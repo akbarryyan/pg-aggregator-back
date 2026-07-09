@@ -3,31 +3,51 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
+	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
+	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
-	"pg-aggregator/internal/domain/payment"
-	"pg-aggregator/internal/domain/provider"
-	providerPkg "pg-aggregator/internal/provider"
-	"pg-aggregator/internal/repository"
-	"pg-aggregator/pkg/logger"
 )
 
 type PaymentService struct {
-	paymentRepo     *repository.PaymentRepository
-	providerAdapter providerPkg.PaymentProvider
+	paymentRepo                *repository.PaymentRepository
+	merchantProviderConfigRepo *repository.MerchantProviderConfigRepository
+	providerRouter             *providerPkg.ProviderRouter
+	appBaseURL                 string
 }
 
-func NewPaymentService(paymentRepo *repository.PaymentRepository, providerAdapter providerPkg.PaymentProvider) *PaymentService {
+type providerCandidate struct {
+	provider        providerPkg.PaymentProvider
+	failoverEnabled bool
+}
+
+func NewPaymentService(
+	paymentRepo *repository.PaymentRepository,
+	merchantProviderConfigRepo *repository.MerchantProviderConfigRepository,
+	providerRouter *providerPkg.ProviderRouter,
+	appBaseURL string,
+) *PaymentService {
 	return &PaymentService{
-		paymentRepo:     paymentRepo,
-		providerAdapter: providerAdapter,
+		paymentRepo:                paymentRepo,
+		merchantProviderConfigRepo: merchantProviderConfigRepo,
+		providerRouter:             providerRouter,
+		appBaseURL:                 strings.TrimRight(appBaseURL, "/"),
 	}
 }
 
 func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreatePaymentRequest) (*payment.Payment, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
+	}
+
+	candidateProviders, err := s.resolveProvidersForMerchant(ctx, req.MerchantID, req.PaymentMethod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select provider: %w", err)
 	}
 
 	reference := s.generateReference()
@@ -50,23 +70,40 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 		UpdatedAt:     time.Now(),
 	}
 
-	providerReq := &provider.ProviderPaymentRequest{
-		InternalReference: reference,
-		Amount:            req.Amount,
-		Currency:          req.Currency,
-		Description:       req.Description,
-		CustomerName:      req.CustomerName,
-		CustomerEmail:     req.CustomerEmail,
-		ExpiresAt:         expiresAt,
-		CallbackURL:       s.buildCallbackURL(reference),
+	var (
+		providerResp *provider.ProviderPaymentResponse
+		lastErr      error
+	)
+
+	for _, candidate := range candidateProviders {
+		selectedProvider := candidate.provider
+		providerReq := &provider.ProviderPaymentRequest{
+			InternalReference: reference,
+			Amount:            req.Amount,
+			Currency:          req.Currency,
+			Description:       req.Description,
+			CustomerName:      req.CustomerName,
+			CustomerEmail:     req.CustomerEmail,
+			ExpiresAt:         expiresAt,
+			CallbackURL:       s.buildCallbackURL(selectedProvider.GetName()),
+		}
+
+		logger.Infof("Creating payment with provider: %s", selectedProvider.GetName())
+
+		providerResp, err = selectedProvider.CreatePayment(ctx, providerReq)
+		if err == nil {
+			break
+		}
+
+		lastErr = err
+		logger.Errorf("Provider %s error: %v", selectedProvider.GetName(), err)
+		if !candidate.failoverEnabled {
+			break
+		}
 	}
 
-	logger.Infof("Creating payment with provider: %s", s.providerAdapter.GetName())
-
-	providerResp, err := s.providerAdapter.CreatePayment(ctx, providerReq)
-	if err != nil {
-		logger.Errorf("Provider error: %v", err)
-		return nil, fmt.Errorf("failed to create payment with provider: %w", err)
+	if lastErr != nil && providerResp == nil {
+		return nil, fmt.Errorf("failed to create payment with available providers: %w", lastErr)
 	}
 
 	p.ProviderName = providerResp.ProviderName
@@ -121,9 +158,14 @@ func (s *PaymentService) CheckPaymentStatus(ctx context.Context, reference strin
 		return p, nil
 	}
 
+	selectedProvider, err := s.getProviderByName(p.ProviderName)
+	if err != nil {
+		return nil, err
+	}
+
 	logger.Infof("Checking payment status with provider: %s", *p.ProviderReference)
 
-	providerStatus, err := s.providerAdapter.GetPaymentStatus(ctx, *p.ProviderReference)
+	providerStatus, err := selectedProvider.GetPaymentStatus(ctx, *p.ProviderReference)
 	if err != nil {
 		logger.Warnf("Failed to check provider status: %v", err)
 		return p, nil
@@ -147,6 +189,73 @@ func (s *PaymentService) generateReference() string {
 	return fmt.Sprintf("PAY-%d-%s", timestamp, uuid.New().String()[:8])
 }
 
-func (s *PaymentService) buildCallbackURL(reference string) string {
-	return fmt.Sprintf("http://localhost:8080/api/v1/provider-webhooks/%s", s.providerAdapter.GetName())
+func (s *PaymentService) buildCallbackURL(providerName string) string {
+	return fmt.Sprintf("%s/api/v1/provider-webhooks/%s", s.appBaseURL, providerName)
+}
+
+func (s *PaymentService) getProviderByName(name string) (providerPkg.PaymentProvider, error) {
+	selectedProvider, exists := s.providerRouter.GetProvider(name)
+	if !exists {
+		return nil, fmt.Errorf("provider %q not registered: %w", name, providerPkg.ErrProviderNotAvailable)
+	}
+	return selectedProvider, nil
+}
+
+func (s *PaymentService) resolveProvidersForMerchant(ctx context.Context, merchantID uuid.UUID, paymentMethod string) ([]providerCandidate, error) {
+	merchantConfigs, err := s.merchantProviderConfigRepo.ListEnabledByMerchantAndPaymentMethod(ctx, merchantID, paymentMethod)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(merchantConfigs) == 0 {
+		defaultProviders, err := s.providerRouter.SelectProviders(paymentMethod)
+		if err != nil {
+			return nil, err
+		}
+
+		candidates := make([]providerCandidate, 0, len(defaultProviders))
+		for _, defaultProvider := range defaultProviders {
+			candidates = append(candidates, providerCandidate{
+				provider:        defaultProvider,
+				failoverEnabled: true,
+			})
+		}
+		return candidates, nil
+	}
+
+	selectedProviders := make([]providerCandidate, 0, len(merchantConfigs))
+	for _, merchantConfig := range merchantConfigs {
+		selectedProvider, exists := s.providerRouter.GetProvider(merchantConfig.ProviderName)
+		if !exists {
+			logger.Warnf(
+				"Skipping unregistered provider %s for merchant %s and payment method %s",
+				merchantConfig.ProviderName,
+				merchantConfig.MerchantID,
+				merchantConfig.PaymentMethod,
+			)
+			continue
+		}
+
+		health := s.providerRouter.GetProviderHealth(merchantConfig.ProviderName)
+		if health.Status == provider.HealthStatusUnhealthy {
+			logger.Warnf(
+				"Skipping unhealthy provider %s for merchant %s and payment method %s",
+				merchantConfig.ProviderName,
+				merchantConfig.MerchantID,
+				merchantConfig.PaymentMethod,
+			)
+			continue
+		}
+
+		selectedProviders = append(selectedProviders, providerCandidate{
+			provider:        selectedProvider,
+			failoverEnabled: merchantConfig.FailoverEnabled,
+		})
+	}
+
+	if len(selectedProviders) == 0 {
+		return nil, providerPkg.ErrProviderNotAvailable
+	}
+
+	return selectedProviders, nil
 }

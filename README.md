@@ -43,19 +43,31 @@ go mod download
 
 4. Run migrations:
 ```bash
-# Instructions will be added
+make migrate
 ```
 
-5. Run the server:
+5. Seed initial data:
+```bash
+make seed
+```
+
+6. Run the server:
 ```bash
 go run cmd/api/main.go
+```
+
+Optional database helper:
+```bash
+make db-create
 ```
 
 ## Development
 
 - The API runs on port 8080 by default
 - Supports hot reload with air (optional)
-- Webhook endpoint: `/api/v1/provider-webhooks/klikqris`
+- Webhook endpoint: `/api/v1/provider-webhooks/{providerName}`
+- Merchant provider config endpoints: `/api/v1/merchants/{merchantID}/provider-configs`
+- Provider health endpoints: `/api/v1/provider-healths` and `/api/v1/provider-healths/{providerName}`
 
 ## Architecture Principles
 

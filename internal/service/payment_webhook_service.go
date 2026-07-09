@@ -6,23 +6,24 @@ import (
 	"fmt"
 	"time"
 
-	"pg-aggregator/internal/domain/payment"
-	"pg-aggregator/pkg/logger"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
+	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 )
 
 func (s *PaymentService) ProcessWebhook(ctx context.Context, providerName string, rawPayload []byte, signature string) error {
 	logger.Infof("Processing webhook from provider: %s", providerName)
 
-	if s.providerAdapter.GetName() != providerName {
-		return fmt.Errorf("provider mismatch: expected %s, got %s", s.providerAdapter.GetName(), providerName)
+	selectedProvider, err := s.getProviderByName(providerName)
+	if err != nil {
+		return err
 	}
 
-	if err := s.providerAdapter.ValidateWebhook(rawPayload, signature); err != nil {
+	if err := selectedProvider.ValidateWebhook(rawPayload, signature); err != nil {
 		logger.Errorf("Webhook validation failed: %v", err)
 		return payment.ErrWebhookValidationFailed
 	}
 
-	webhookPayload, err := s.providerAdapter.ParseWebhook(rawPayload)
+	webhookPayload, err := selectedProvider.ParseWebhook(rawPayload)
 	if err != nil {
 		logger.Errorf("Failed to parse webhook: %v", err)
 		return payment.ErrInvalidProviderReference

@@ -4,10 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
-
 	"github.com/google/uuid"
-	"pg-aggregator/internal/domain/payment"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 )
 
 type PaymentRepository struct {

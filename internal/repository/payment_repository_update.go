@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"pg-aggregator/internal/domain/payment"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 )
 
 func (r *PaymentRepository) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) error {

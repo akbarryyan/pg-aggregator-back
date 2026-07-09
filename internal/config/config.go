@@ -60,8 +60,8 @@ func Load() (*Config, error) {
 			Name:        getEnv("APP_NAME", "pg-aggregator"),
 			Environment: getEnv("APP_ENV", "development"),
 			Port:        getEnv("APP_PORT", "8080"),
-			URL:         getEnv("APP_URL", "http://localhost:8080"),
-			FrontendURL: getEnv("FRONTEND_URL", "http://localhost:3000"),
+			URL:         getEnv("APP_URL", ""),
+			FrontendURL: getEnv("FRONTEND_URL", ""),
 		},
 		DB: DBConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
@@ -97,6 +97,14 @@ func Load() (*Config, error) {
 func (c *Config) Validate() error {
 	if c.App.Name == "" {
 		return fmt.Errorf("APP_NAME is required")
+	}
+
+	if c.App.URL == "" {
+		return fmt.Errorf("APP_URL is required")
+	}
+
+	if c.App.FrontendURL == "" {
+		return fmt.Errorf("FRONTEND_URL is required")
 	}
 
 	if c.DB.Host == "" || c.DB.Name == "" {

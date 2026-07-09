@@ -3,21 +3,24 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
+	"github.com/akbarryyan/pg-aggregator-back/internal/service"
+	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"pg-aggregator/internal/domain/payment"
-	"pg-aggregator/internal/service"
-	"pg-aggregator/pkg/logger"
 )
 
 type PaymentHandler struct {
 	paymentService *service.PaymentService
+	frontendURL    string
 }
 
-func NewPaymentHandler(paymentService *service.PaymentService) *PaymentHandler {
+func NewPaymentHandler(paymentService *service.PaymentService, frontendURL string) *PaymentHandler {
 	return &PaymentHandler{
 		paymentService: paymentService,
+		frontendURL:    strings.TrimRight(frontendURL, "/"),
 	}
 }
 
@@ -36,7 +39,7 @@ func (h *PaymentHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := payment.ToPaymentResponse(p, "http://localhost:3000")
+	response := payment.ToPaymentResponse(p, h.frontendURL)
 	respondJSON(w, http.StatusCreated, response)
 }
 
@@ -61,7 +64,7 @@ func (h *PaymentHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := payment.ToPaymentResponse(p, "http://localhost:3000")
+	response := payment.ToPaymentResponse(p, h.frontendURL)
 	respondJSON(w, http.StatusOK, response)
 }
 

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"pg-aggregator/internal/domain/merchant"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 )
 
 type MerchantRepository struct {

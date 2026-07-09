@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"time"
 
-	"pg-aggregator/internal/domain/provider"
-	providerPkg "pg-aggregator/internal/provider"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 )
 
 type KlikQrisAdapter struct {

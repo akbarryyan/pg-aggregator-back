@@ -13,6 +13,12 @@ const (
 	ProviderDuitku   = "duitku"
 )
 
+const (
+	HealthStatusHealthy   = "healthy"
+	HealthStatusDegraded  = "degraded"
+	HealthStatusUnhealthy = "unhealthy"
+)
+
 type ProviderPaymentRequest struct {
 	InternalReference string
 	Amount            int64
@@ -54,6 +60,69 @@ type ProviderConfig struct {
 	BaseURL   string
 	APIKey    string
 	SecretKey string
+}
+
+type MerchantProviderConfig struct {
+	ID              uuid.UUID `json:"id" db:"id"`
+	MerchantID      uuid.UUID `json:"merchant_id" db:"merchant_id"`
+	ProviderName    string    `json:"provider_name" db:"provider_name"`
+	PaymentMethod   string    `json:"payment_method" db:"payment_method"`
+	Priority        int       `json:"priority" db:"priority"`
+	Weight          int       `json:"weight" db:"weight"`
+	FailoverEnabled bool      `json:"failover_enabled" db:"failover_enabled"`
+	IsEnabled       bool      `json:"is_enabled" db:"is_enabled"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at" db:"updated_at"`
+}
+
+type UpsertMerchantProviderConfigRequest struct {
+	ProviderName    string `json:"provider_name"`
+	PaymentMethod   string `json:"payment_method"`
+	Priority        int    `json:"priority"`
+	Weight          int    `json:"weight"`
+	FailoverEnabled bool   `json:"failover_enabled"`
+	IsEnabled       bool   `json:"is_enabled"`
+}
+
+func (r *UpsertMerchantProviderConfigRequest) Normalize() {
+	if r.Priority <= 0 {
+		r.Priority = 1
+	}
+	if r.Weight <= 0 {
+		r.Weight = 100
+	}
+}
+
+func (r *UpsertMerchantProviderConfigRequest) Validate() error {
+	r.Normalize()
+	if r.ProviderName == "" {
+		return ErrProviderConfigProviderRequired
+	}
+	if r.PaymentMethod == "" {
+		return ErrProviderConfigPaymentMethodRequired
+	}
+	return nil
+}
+
+type ProviderHealth struct {
+	ProviderName string    `json:"provider_name"`
+	Status       string    `json:"status"`
+	Reason       string    `json:"reason,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type UpdateProviderHealthRequest struct {
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
+func (r *UpdateProviderHealthRequest) Validate() error {
+	switch r.Status {
+	case HealthStatusHealthy, HealthStatusDegraded, HealthStatusUnhealthy:
+		return nil
+	default:
+		return ErrInvalidProviderHealthStatus
+	}
 }
 
 type WebhookEvent struct {

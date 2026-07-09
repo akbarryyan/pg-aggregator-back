@@ -10,12 +10,13 @@ import (
 	"syscall"
 	"time"
 
-	"pg-aggregator/internal/config"
-	"pg-aggregator/internal/handler"
-	"pg-aggregator/internal/provider/klikqris"
-	"pg-aggregator/internal/repository"
-	"pg-aggregator/internal/service"
-	"pg-aggregator/pkg/logger"
+	"github.com/akbarryyan/pg-aggregator-back/internal/config"
+	"github.com/akbarryyan/pg-aggregator-back/internal/handler"
+	"github.com/akbarryyan/pg-aggregator-back/internal/provider"
+	"github.com/akbarryyan/pg-aggregator-back/internal/provider/klikqris"
+	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
+	"github.com/akbarryyan/pg-aggregator-back/internal/service"
+	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
@@ -40,8 +41,7 @@ func main() {
 	defer db.Close()
 
 	paymentRepo := repository.NewPaymentRepository(db)
-	merchantRepo := repository.NewMerchantRepository(db)
-
+	merchantProviderConfigRepo := repository.NewMerchantProviderConfigRepository(db)
 	klikqrisAdapter := klikqris.NewKlikQrisAdapter(
 		cfg.KlikQris.BaseURL,
 		cfg.KlikQris.APIKey,
@@ -49,12 +49,18 @@ func main() {
 		cfg.KlikQris.MerchantID,
 	)
 
-	paymentService := service.NewPaymentService(paymentRepo, klikqrisAdapter)
+	providerRouter := provider.NewProviderRouter()
+	providerRouter.RegisterProvider(klikqrisAdapter)
+	providerRouter.RegisterPaymentMethodProvider("qris", klikqrisAdapter.GetName())
 
-	paymentHandler := handler.NewPaymentHandler(paymentService)
+	paymentService := service.NewPaymentService(paymentRepo, merchantProviderConfigRepo, providerRouter, cfg.App.URL)
+	providerRoutingService := service.NewProviderRoutingService(merchantProviderConfigRepo, providerRouter)
+
+	paymentHandler := handler.NewPaymentHandler(paymentService, cfg.App.FrontendURL)
 	webhookHandler := handler.NewWebhookHandler(paymentService)
+	providerRoutingHandler := handler.NewProviderRoutingHandler(providerRoutingService)
 
-	router := setupRouter(paymentHandler, webhookHandler)
+	router := setupRouter(paymentHandler, webhookHandler, providerRoutingHandler)
 
 	c := cors.New(cors.Options{
 		AllowedOrigins:   []string{cfg.App.FrontendURL},
@@ -115,7 +121,7 @@ func initDB(cfg *config.Config) (*sql.DB, error) {
 	return db, nil
 }
 
-func setupRouter(paymentHandler *handler.PaymentHandler, webhookHandler *handler.WebhookHandler) *mux.Router {
+func setupRouter(paymentHandler *handler.PaymentHandler, webhookHandler *handler.WebhookHandler, providerRoutingHandler *handler.ProviderRoutingHandler) *mux.Router {
 	r := mux.NewRouter()
 
 	api := r.PathPrefix("/api/v1").Subrouter()
@@ -124,7 +130,12 @@ func setupRouter(paymentHandler *handler.PaymentHandler, webhookHandler *handler
 	api.HandleFunc("/payments/{id}", paymentHandler.GetPayment).Methods("GET")
 	api.HandleFunc("/payments/{id}/status", paymentHandler.GetPaymentStatus).Methods("GET")
 
-	api.HandleFunc("/provider-webhooks/klikqris", webhookHandler.HandleKlikQrisWebhook).Methods("POST")
+	api.HandleFunc("/provider-webhooks/{providerName}", webhookHandler.HandleProviderWebhook).Methods("POST")
+	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.ListMerchantProviderConfigs).Methods("GET")
+	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.UpsertMerchantProviderConfig).Methods("POST", "PUT")
+	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.DeleteMerchantProviderConfig).Methods("DELETE")
+	api.HandleFunc("/provider-healths", providerRoutingHandler.ListProviderHealths).Methods("GET")
+	api.HandleFunc("/provider-healths/{providerName}", providerRoutingHandler.UpdateProviderHealth).Methods("PUT")
 
 	api.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

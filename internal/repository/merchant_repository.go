@@ -141,3 +141,98 @@ func (r *MerchantRepository) SetActive(ctx context.Context, id uuid.UUID, isActi
 	}
 	return nil
 }
+
+func (r *MerchantRepository) List(ctx context.Context, limit, offset int) ([]*merchant.Merchant, error) {
+	return r.ListAdmin(ctx, "", nil, limit, offset)
+}
+
+func (r *MerchantRepository) ListAdmin(
+	ctx context.Context,
+	search string,
+	isActive *bool,
+	limit, offset int,
+) ([]*merchant.Merchant, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := `
+		SELECT id, name, email, phone, business_name, webhook_url, is_active, created_at, updated_at
+		FROM merchants
+		WHERE 1=1
+	`
+	args := make([]interface{}, 0, 4)
+	argN := 1
+
+	if isActive != nil {
+		query += fmt.Sprintf(" AND is_active = $%d", argN)
+		args = append(args, *isActive)
+		argN++
+	}
+	if search != "" {
+		query += fmt.Sprintf(` AND (
+			name ILIKE $%d OR
+			email ILIKE $%d OR
+			COALESCE(phone, '') ILIKE $%d OR
+			business_name ILIKE $%d
+		)`, argN, argN, argN, argN)
+		args = append(args, "%"+search+"%")
+		argN++
+	}
+
+	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argN, argN+1)
+	args = append(args, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list merchants: %w", err)
+	}
+	defer rows.Close()
+
+	var merchants []*merchant.Merchant
+	for rows.Next() {
+		m := &merchant.Merchant{}
+		if err := rows.Scan(
+			&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.IsActive, &m.CreatedAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan merchant: %w", err)
+		}
+		merchants = append(merchants, m)
+	}
+
+	return merchants, nil
+}
+
+func (r *MerchantRepository) Count(ctx context.Context) (int64, error) {
+	return r.CountAdmin(ctx, "", nil)
+}
+
+func (r *MerchantRepository) CountAdmin(ctx context.Context, search string, isActive *bool) (int64, error) {
+	query := `SELECT COUNT(*) FROM merchants WHERE 1=1`
+	args := make([]interface{}, 0, 2)
+	argN := 1
+
+	if isActive != nil {
+		query += fmt.Sprintf(" AND is_active = $%d", argN)
+		args = append(args, *isActive)
+		argN++
+	}
+	if search != "" {
+		query += fmt.Sprintf(` AND (
+			name ILIKE $%d OR
+			email ILIKE $%d OR
+			COALESCE(phone, '') ILIKE $%d OR
+			business_name ILIKE $%d
+		)`, argN, argN, argN, argN)
+		args = append(args, "%"+search+"%")
+	}
+
+	var count int64
+	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count merchants: %w", err)
+	}
+	return count, nil
+}

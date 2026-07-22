@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	ProviderKlikQris = "klikqris"
+	ProviderCashi    = "cashi"
 	ProviderMidtrans = "midtrans"
 	ProviderXendit   = "xendit"
 	ProviderDuitku   = "duitku"
@@ -34,6 +34,7 @@ type ProviderPaymentResponse struct {
 	ProviderReference string
 	ProviderName      string
 	Status            string
+	Amount            int64
 	QRISData          *string
 	PaymentURL        *string
 	ExpiresAt         time.Time
@@ -127,7 +128,7 @@ func (r *UpdateProviderHealthRequest) Validate() error {
 
 type WebhookEvent struct {
 	ID                uuid.UUID              `json:"id" db:"id"`
-	PaymentID         uuid.UUID              `json:"payment_id" db:"payment_id"`
+	PaymentID         *uuid.UUID             `json:"payment_id,omitempty" db:"payment_id"`
 	ProviderName      string                 `json:"provider_name" db:"provider_name"`
 	ProviderReference string                 `json:"provider_reference" db:"provider_reference"`
 	EventType         string                 `json:"event_type" db:"event_type"`

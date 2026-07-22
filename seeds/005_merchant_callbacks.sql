@@ -1,0 +1,100 @@
+-- Seed: sample merchant callback deliveries (demo history)
+-- Depends on payments from 004_payments_and_logs.sql
+
+INSERT INTO merchant_callback_deliveries (
+    id, payment_id, merchant_id, event_type, target_url, request_payload,
+    attempt_number, status, http_status, response_body, error_message,
+    delivered_at, next_retry_at, created_at, updated_at
+) VALUES
+(
+    '66666666-6666-6666-6666-000000000001',
+    '55555555-5555-5555-5555-000000000001',
+    '11111111-1111-1111-1111-111111111111',
+    'payment.paid',
+    'https://merchant-seed.local/webhooks/1',
+    '{"event":"payment.paid","reference":"PAY-SEED-0001","status":"paid","amount":1537000,"currency":"IDR"}'::jsonb,
+    1,
+    'success',
+    200,
+    '{"ok":true}',
+    NULL,
+    CURRENT_TIMESTAMP - INTERVAL '218 hours',
+    NULL,
+    CURRENT_TIMESTAMP - INTERVAL '218 hours',
+    CURRENT_TIMESTAMP - INTERVAL '218 hours'
+),
+(
+    '66666666-6666-6666-6666-000000000002',
+    '55555555-5555-5555-5555-000000000002',
+    '11111111-1111-1111-1111-111111111111',
+    'payment.paid',
+    'https://merchant-demo.local/webhooks/payments',
+    '{"event":"payment.paid","reference":"PAY-SEED-0002","status":"paid"}'::jsonb,
+    1,
+    'failed',
+    502,
+    'Bad Gateway',
+    'unexpected HTTP status 502',
+    NULL,
+    CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+    CURRENT_TIMESTAMP - INTERVAL '200 hours',
+    CURRENT_TIMESTAMP - INTERVAL '200 hours'
+),
+(
+    '66666666-6666-6666-6666-000000000003',
+    '55555555-5555-5555-5555-000000000002',
+    '11111111-1111-1111-1111-111111111111',
+    'payment.paid',
+    'https://merchant-demo.local/webhooks/payments',
+    '{"event":"payment.paid","reference":"PAY-SEED-0002","status":"paid"}'::jsonb,
+    2,
+    'failed',
+    NULL,
+    NULL,
+    'connection refused',
+    NULL,
+    CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+    CURRENT_TIMESTAMP - INTERVAL '199 hours',
+    CURRENT_TIMESTAMP - INTERVAL '199 hours'
+),
+(
+    '66666666-6666-6666-6666-000000000004',
+    '55555555-5555-5555-5555-000000000003',
+    '11111111-1111-1111-1111-111111111111',
+    'payment.expired',
+    'https://merchant-demo.local/webhooks/payments',
+    '{"event":"payment.expired","reference":"PAY-SEED-0003","status":"expired"}'::jsonb,
+    1,
+    'pending',
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    CURRENT_TIMESTAMP - INTERVAL '10 hours',
+    CURRENT_TIMESTAMP - INTERVAL '10 hours'
+),
+(
+    '66666666-6666-6666-6666-000000000005',
+    '55555555-5555-5555-5555-000000000004',
+    '11111111-1111-1111-1111-111111111111',
+    'payment.failed',
+    'https://merchant-seed.local/webhooks/4',
+    '{"event":"payment.failed","reference":"PAY-SEED-0004","status":"failed"}'::jsonb,
+    1,
+    'skipped',
+    NULL,
+    NULL,
+    'no reachable merchant endpoint in demo',
+    NULL,
+    NULL,
+    CURRENT_TIMESTAMP - INTERVAL '50 hours',
+    CURRENT_TIMESTAMP - INTERVAL '50 hours'
+)
+ON CONFLICT (id) DO UPDATE SET
+    status = EXCLUDED.status,
+    http_status = EXCLUDED.http_status,
+    response_body = EXCLUDED.response_body,
+    error_message = EXCLUDED.error_message,
+    attempt_number = EXCLUDED.attempt_number,
+    updated_at = CURRENT_TIMESTAMP;

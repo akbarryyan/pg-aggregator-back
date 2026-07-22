@@ -12,7 +12,7 @@ type Config struct {
 	App      AppConfig
 	DB       DBConfig
 	Redis    RedisConfig
-	KlikQris KlikQrisConfig
+	Cashi    CashiConfig
 	Security SecurityConfig
 }
 
@@ -39,11 +39,13 @@ type RedisConfig struct {
 	Password string
 }
 
-type KlikQrisConfig struct {
-	BaseURL    string
-	APIKey     string
-	SecretKey  string
-	MerchantID string
+type CashiConfig struct {
+	// BaseURL e.g. https://cashi.id (see docs/cashi-api.md)
+	BaseURL string
+	// APIKey sent as x-api-key header on create-order / check-status
+	APIKey string
+	// SecretKey used only to verify webhook HMAC signatures
+	SecretKey string
 }
 
 type SecurityConfig struct {
@@ -76,11 +78,10 @@ func Load() (*Config, error) {
 			Port:     getEnv("REDIS_PORT", "6379"),
 			Password: getEnv("REDIS_PASSWORD", ""),
 		},
-		KlikQris: KlikQrisConfig{
-			BaseURL:    getEnv("KLIKQRIS_BASE_URL", ""),
-			APIKey:     getEnv("KLIKQRIS_API_KEY", ""),
-			SecretKey:  getEnv("KLIKQRIS_SECRET_KEY", ""),
-			MerchantID: getEnv("KLIKQRIS_MERCHANT_ID", ""),
+		Cashi: CashiConfig{
+			BaseURL:   getEnv("CASHI_BASE_URL", "https://cashi.id"),
+			APIKey:    getEnv("CASHI_API_KEY", ""),
+			SecretKey: getEnv("CASHI_SECRET_KEY", ""),
 		},
 		Security: SecurityConfig{
 			JWTSecret: getEnv("JWT_SECRET", "change-this-secret"),
@@ -112,8 +113,8 @@ func (c *Config) Validate() error {
 	}
 
 	if c.App.Environment == "production" {
-		if c.KlikQris.APIKey == "" || c.KlikQris.SecretKey == "" {
-			return fmt.Errorf("KlikQris credentials are required in production")
+		if c.Cashi.APIKey == "" || c.Cashi.SecretKey == "" {
+			return fmt.Errorf("Cashi credentials are required in production")
 		}
 		if c.Security.JWTSecret == "change-this-secret" {
 			return fmt.Errorf("JWT_SECRET must be changed in production")

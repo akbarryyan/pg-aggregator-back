@@ -161,6 +161,58 @@ func (r *ProviderRouter) ListProviderHealths() []domainProvider.ProviderHealth {
 	return healths
 }
 
+// ProviderInfo is a safe admin-facing summary of a registered provider.
+// Credentials are never included.
+type ProviderInfo struct {
+	Name            string                       `json:"name"`
+	PaymentMethods  []string                     `json:"payment_methods"`
+	Health          domainProvider.ProviderHealth `json:"health"`
+	IsRegistered    bool                         `json:"is_registered"`
+}
+
+func (r *ProviderRouter) ListProviders() []ProviderInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	methodByProvider := make(map[string][]string)
+	for method, providerNames := range r.paymentMethodProviders {
+		for _, providerName := range providerNames {
+			methodByProvider[providerName] = append(methodByProvider[providerName], method)
+		}
+	}
+
+	infos := make([]ProviderInfo, 0, len(r.providers))
+	for key, p := range r.providers {
+		methods := methodByProvider[key]
+		if methods == nil {
+			methods = []string{}
+		}
+		sort.Strings(methods)
+
+		health, exists := r.providerHealths[key]
+		if !exists {
+			health = domainProvider.ProviderHealth{
+				ProviderName: p.GetName(),
+				Status:       domainProvider.HealthStatusHealthy,
+				UpdatedAt:    time.Now(),
+			}
+		}
+
+		infos = append(infos, ProviderInfo{
+			Name:           p.GetName(),
+			PaymentMethods: methods,
+			Health:         health,
+			IsRegistered:   true,
+		})
+	}
+
+	sort.Slice(infos, func(i, j int) bool {
+		return normalizeKey(infos[i].Name) < normalizeKey(infos[j].Name)
+	})
+
+	return infos
+}
+
 func (r *ProviderRouter) isProviderAvailableLocked(providerName string) bool {
 	health, exists := r.providerHealths[normalizeKey(providerName)]
 	if !exists {

@@ -19,12 +19,15 @@ set +a
 : "${DB_PASSWORD:?DB_PASSWORD is required}"
 : "${DB_NAME:?DB_NAME is required}"
 
-PGPASSWORD="$DB_PASSWORD" psql \
-  -h "$DB_HOST" \
-  -p "$DB_PORT" \
-  -U "$DB_USER" \
-  -d "$DB_NAME" \
-  -v ON_ERROR_STOP=1 \
-  -f seeds/001_initial_data.sql
+for file in seeds/*.sql; do
+  echo "Seeding $file"
+  PGPASSWORD="$DB_PASSWORD" psql \
+    -h "$DB_HOST" \
+    -p "$DB_PORT" \
+    -U "$DB_USER" \
+    -d "$DB_NAME" \
+    -v ON_ERROR_STOP=1 \
+    -f "$file"
+done
 
 echo "Seed completed"

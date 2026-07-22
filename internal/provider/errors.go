@@ -8,4 +8,5 @@ var (
 	ErrProviderAPIError         = errors.New("provider API error")
 	ErrInvalidWebhookSignature  = errors.New("invalid webhook signature")
 	ErrInvalidWebhookPayload    = errors.New("invalid webhook payload")
+	ErrTestWebhookEvent         = errors.New("test webhook event ignored")
 )

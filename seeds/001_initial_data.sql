@@ -26,7 +26,7 @@ INSERT INTO merchant_provider_configs (
 ) VALUES (
     '22222222-2222-2222-2222-222222222221',
     '11111111-1111-1111-1111-111111111111',
-    'klikqris',
+    'cashi',
     'qris',
     1,
     100,
@@ -35,7 +35,10 @@ INSERT INTO merchant_provider_configs (
     CURRENT_TIMESTAMP,
     CURRENT_TIMESTAMP
 )
-ON CONFLICT (merchant_id, payment_method, provider_name) DO UPDATE SET
+ON CONFLICT (id) DO UPDATE SET
+    merchant_id = EXCLUDED.merchant_id,
+    provider_name = EXCLUDED.provider_name,
+    payment_method = EXCLUDED.payment_method,
     priority = EXCLUDED.priority,
     weight = EXCLUDED.weight,
     failover_enabled = EXCLUDED.failover_enabled,

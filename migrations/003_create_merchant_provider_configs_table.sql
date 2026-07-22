@@ -11,17 +11,39 @@ CREATE TABLE IF NOT EXISTS merchant_provider_configs (
     failover_enabled BOOLEAN NOT NULL DEFAULT true,
     is_enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_merchant_provider_method UNIQUE (merchant_id, payment_method, provider_name),
-    CONSTRAINT chk_merchant_provider_priority CHECK (priority > 0),
-    CONSTRAINT chk_merchant_provider_weight CHECK (weight > 0)
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_merchant_provider_configs_merchant_method
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_merchant_provider_method'
+    ) THEN
+        ALTER TABLE merchant_provider_configs
+            ADD CONSTRAINT uq_merchant_provider_method
+            UNIQUE (merchant_id, payment_method, provider_name);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_merchant_provider_priority'
+    ) THEN
+        ALTER TABLE merchant_provider_configs
+            ADD CONSTRAINT chk_merchant_provider_priority CHECK (priority > 0);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_merchant_provider_weight'
+    ) THEN
+        ALTER TABLE merchant_provider_configs
+            ADD CONSTRAINT chk_merchant_provider_weight CHECK (weight > 0);
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_merchant_provider_configs_merchant_method
     ON merchant_provider_configs(merchant_id, payment_method, priority);
-CREATE INDEX idx_merchant_provider_configs_provider_name
+CREATE INDEX IF NOT EXISTS idx_merchant_provider_configs_provider_name
     ON merchant_provider_configs(provider_name);
-CREATE INDEX idx_merchant_provider_configs_enabled
+CREATE INDEX IF NOT EXISTS idx_merchant_provider_configs_enabled
     ON merchant_provider_configs(is_enabled);
 
 COMMENT ON TABLE merchant_provider_configs IS 'Stores enabled providers and fallback order per merchant and payment method';

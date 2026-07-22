@@ -22,6 +22,11 @@ const (
 	CurrencyIDR = "IDR"
 )
 
+const (
+	EnvironmentSandbox    = "sandbox"
+	EnvironmentProduction = "production"
+)
+
 type Payment struct {
 	ID                uuid.UUID  `json:"id" db:"id"`
 	Reference         string     `json:"reference" db:"reference"`
@@ -37,6 +42,7 @@ type Payment struct {
 	CustomerEmail     *string    `json:"customer_email,omitempty" db:"customer_email"`
 	QRISData          *string    `json:"qris_data,omitempty" db:"qris_data"`
 	CallbackURL       *string    `json:"callback_url,omitempty" db:"callback_url"`
+	Environment       string     `json:"environment" db:"environment"`
 	ExpiresAt         time.Time  `json:"expires_at" db:"expires_at"`
 	PaidAt            *time.Time `json:"paid_at,omitempty" db:"paid_at"`
 	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
@@ -44,15 +50,33 @@ type Payment struct {
 }
 
 type CreatePaymentRequest struct {
-	MerchantID        uuid.UUID `json:"merchant_id"`
-	Amount            int64     `json:"amount"`
-	Currency          string    `json:"currency"`
-	PaymentMethod     string    `json:"payment_method"`
-	Description       string    `json:"description"`
-	CustomerName      *string   `json:"customer_name,omitempty"`
-	CustomerEmail     *string   `json:"customer_email,omitempty"`
-	CallbackURL       *string   `json:"callback_url,omitempty"`
-	ExpiresInMinutes  int       `json:"expires_in_minutes,omitempty"`
+	MerchantID       uuid.UUID `json:"merchant_id"`
+	Amount           int64     `json:"amount"`
+	Currency         string    `json:"currency"`
+	PaymentMethod    string    `json:"payment_method"`
+	Description      string    `json:"description"`
+	CustomerName     *string   `json:"customer_name,omitempty"`
+	CustomerEmail    *string   `json:"customer_email,omitempty"`
+	CallbackURL      *string   `json:"callback_url,omitempty"`
+	ExpiresInMinutes int       `json:"expires_in_minutes,omitempty"`
+	// Environment: sandbox | production. Forced from API key when present.
+	Environment string `json:"environment,omitempty"`
+}
+
+// NormalizeEnvironment maps free-form values to sandbox|production.
+func NormalizeEnvironment(raw string) string {
+	switch raw {
+	case EnvironmentSandbox, "test", "dev", "development":
+		return EnvironmentSandbox
+	case EnvironmentProduction, "prod", "live", "":
+		return EnvironmentProduction
+	default:
+		// Accept already-normalized or fall back
+		if raw == EnvironmentSandbox {
+			return EnvironmentSandbox
+		}
+		return EnvironmentProduction
+	}
 }
 
 func (r *CreatePaymentRequest) Validate() error {
@@ -92,6 +116,8 @@ func (r *CreatePaymentRequest) Validate() error {
 		return ErrInvalidExpiration
 	}
 
+	r.Environment = NormalizeEnvironment(r.Environment)
+
 	return nil
 }
 
@@ -110,6 +136,7 @@ type PaymentResponse struct {
 	CustomerEmail     *string    `json:"customer_email,omitempty"`
 	QRISData          *string    `json:"qris_data,omitempty"`
 	CheckoutURL       string     `json:"checkout_url"`
+	Environment       string     `json:"environment"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	PaidAt            *time.Time `json:"paid_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
@@ -117,6 +144,10 @@ type PaymentResponse struct {
 }
 
 func ToPaymentResponse(p *Payment, baseURL string) *PaymentResponse {
+	env := p.Environment
+	if env == "" {
+		env = EnvironmentProduction
+	}
 	return &PaymentResponse{
 		ID:                p.ID,
 		Reference:         p.Reference,
@@ -132,6 +163,7 @@ func ToPaymentResponse(p *Payment, baseURL string) *PaymentResponse {
 		CustomerEmail:     p.CustomerEmail,
 		QRISData:          p.QRISData,
 		CheckoutURL:       baseURL + "/pay/" + p.Reference,
+		Environment:       env,
 		ExpiresAt:         p.ExpiresAt,
 		PaidAt:            p.PaidAt,
 		CreatedAt:         p.CreatedAt,

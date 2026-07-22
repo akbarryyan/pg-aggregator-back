@@ -34,10 +34,7 @@ func (h *WebhookHandler) HandleProviderWebhook(w http.ResponseWriter, r *http.Re
 	}
 	defer r.Body.Close()
 
-	signature := r.Header.Get("X-Signature")
-	if signature == "" {
-		signature = r.Header.Get("X-KlikQris-Signature")
-	}
+	signature := r.Header.Get("x-gateway-signature")
 
 	logger.Infof("Received webhook from provider %s, signature present: %v", providerName, signature != "")
 

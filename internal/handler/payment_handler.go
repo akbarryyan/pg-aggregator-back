@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
+	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
@@ -29,6 +31,19 @@ func (h *PaymentHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.Errorf("Failed to decode request: %v", err)
 		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// Merchant API key auth: force merchant_id + environment from authenticated key.
+	if merchantID, ok := middleware.MerchantIDFromContext(r.Context()); ok {
+		req.MerchantID = merchantID
+	}
+	if env, ok := middleware.MerchantEnvironmentFromContext(r.Context()); ok {
+		req.Environment = env
+	}
+
+	if err := req.Validate(); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -64,8 +79,53 @@ func (h *PaymentHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if merchantID, ok := middleware.MerchantIDFromContext(r.Context()); ok {
+		if p.MerchantID != merchantID {
+			respondError(w, http.StatusNotFound, "Payment not found")
+			return
+		}
+	}
+
 	response := payment.ToPaymentResponse(p, h.frontendURL)
 	respondJSON(w, http.StatusOK, response)
+}
+
+// GetPaymentByReference is a public checkout endpoint (limited fields for pay page).
+func (h *PaymentHandler) GetPaymentByReference(w http.ResponseWriter, r *http.Request) {
+	ref := strings.TrimSpace(mux.Vars(r)["reference"])
+	if ref == "" {
+		respondError(w, http.StatusBadRequest, "Reference is required")
+		return
+	}
+	p, err := h.paymentService.GetPaymentByReference(r.Context(), ref)
+	if err != nil {
+		if err == payment.ErrPaymentNotFound {
+			respondError(w, http.StatusNotFound, "Payment not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "Failed to load payment")
+		return
+	}
+	// Public-safe subset (still includes QR for checkout UX)
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"id":            p.ID,
+		"reference":     p.Reference,
+		"amount":        p.Amount,
+		"currency":      p.Currency,
+		"status":        p.Status,
+		"description":   p.Description,
+		"payment_method": p.PaymentMethod,
+		"environment":   payment.NormalizeEnvironment(p.Environment),
+		"qris_data":     p.QRISData,
+		"expires_at":    p.ExpiresAt.UTC().Format(time.RFC3339),
+		"paid_at": func() interface{} {
+			if p.PaidAt == nil {
+				return nil
+			}
+			return p.PaidAt.UTC().Format(time.RFC3339)
+		}(),
+		"created_at": p.CreatedAt.UTC().Format(time.RFC3339),
+	})
 }
 
 func (h *PaymentHandler) GetPaymentStatus(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +136,23 @@ func (h *PaymentHandler) GetPaymentStatus(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid payment ID")
 		return
+	}
+
+	// Ownership check before returning status
+	if merchantID, ok := middleware.MerchantIDFromContext(r.Context()); ok {
+		p, err := h.paymentService.GetPayment(r.Context(), id)
+		if err != nil {
+			if err == payment.ErrPaymentNotFound {
+				respondError(w, http.StatusNotFound, "Payment not found")
+				return
+			}
+			respondError(w, http.StatusInternalServerError, "Failed to get payment status")
+			return
+		}
+		if p.MerchantID != merchantID {
+			respondError(w, http.StatusNotFound, "Payment not found")
+			return
+		}
 	}
 
 	status, err := h.paymentService.GetPaymentStatus(r.Context(), id)

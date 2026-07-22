@@ -8,7 +8,7 @@ Backend service untuk platform pembayaran QRIS menggunakan Go.
 - **Router**: Gorilla Mux
 - **Database**: PostgreSQL
 - **Cache/Queue**: Redis (future)
-- **Provider**: KlikQris (initial)
+- **Provider**: Cashi (initial)
 
 ## Project Structure
 
@@ -71,9 +71,9 @@ make db-create
 
 ## Architecture Principles
 
-- Payment orchestration backend (not KlikQris wrapper)
+- Payment orchestration backend (not Cashi wrapper)
 - Provider-agnostic core system
-- KlikQris is just one provider adapter
+- Cashi is just one provider adapter
 - All provider-specific logic isolated in adapters
 - Normalized internal payment status
 

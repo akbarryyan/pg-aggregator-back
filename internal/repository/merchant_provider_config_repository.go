@@ -153,3 +153,119 @@ func (r *MerchantProviderConfigRepository) Delete(ctx context.Context, merchantI
 
 	return nil
 }
+
+// RoutingRow joins merchant display name for admin routing views.
+type RoutingRow struct {
+	Config       *provider.MerchantProviderConfig
+	MerchantName string
+	MerchantEmail string
+}
+
+func (r *MerchantProviderConfigRepository) ListByProvider(ctx context.Context, providerName string, limit, offset int) ([]RoutingRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := `
+		SELECT
+			c.id, c.merchant_id, c.provider_name, c.payment_method, c.priority, c.weight,
+			c.failover_enabled, c.is_enabled, c.created_at, c.updated_at,
+			COALESCE(m.business_name, m.name, '') AS merchant_name,
+			COALESCE(m.email, '') AS merchant_email
+		FROM merchant_provider_configs c
+		LEFT JOIN merchants m ON m.id = c.merchant_id
+		WHERE LOWER(c.provider_name) = LOWER($1)
+		ORDER BY c.priority ASC, m.business_name ASC
+		LIMIT $2 OFFSET $3
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, providerName, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list configs by provider: %w", err)
+	}
+	defer rows.Close()
+
+	return scanRoutingRows(rows)
+}
+
+func (r *MerchantProviderConfigRepository) CountByProvider(ctx context.Context, providerName string) (int64, error) {
+	var count int64
+	query := `SELECT COUNT(*) FROM merchant_provider_configs WHERE LOWER(provider_name) = LOWER($1)`
+	if err := r.db.QueryRowContext(ctx, query, providerName).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count configs by provider: %w", err)
+	}
+	return count, nil
+}
+
+func (r *MerchantProviderConfigRepository) ListAllRouting(ctx context.Context, limit, offset int) ([]RoutingRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := `
+		SELECT
+			c.id, c.merchant_id, c.provider_name, c.payment_method, c.priority, c.weight,
+			c.failover_enabled, c.is_enabled, c.created_at, c.updated_at,
+			COALESCE(m.business_name, m.name, '') AS merchant_name,
+			COALESCE(m.email, '') AS merchant_email
+		FROM merchant_provider_configs c
+		LEFT JOIN merchants m ON m.id = c.merchant_id
+		ORDER BY c.payment_method ASC, c.priority ASC, m.business_name ASC
+		LIMIT $1 OFFSET $2
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list routing configs: %w", err)
+	}
+	defer rows.Close()
+
+	return scanRoutingRows(rows)
+}
+
+func (r *MerchantProviderConfigRepository) CountAllRouting(ctx context.Context) (int64, error) {
+	var count int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM merchant_provider_configs`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count routing configs: %w", err)
+	}
+	return count, nil
+}
+
+func scanRoutingRows(rows *sql.Rows) ([]RoutingRow, error) {
+	var result []RoutingRow
+	for rows.Next() {
+		cfg := &provider.MerchantProviderConfig{}
+		var merchantName, merchantEmail string
+		if err := rows.Scan(
+			&cfg.ID,
+			&cfg.MerchantID,
+			&cfg.ProviderName,
+			&cfg.PaymentMethod,
+			&cfg.Priority,
+			&cfg.Weight,
+			&cfg.FailoverEnabled,
+			&cfg.IsEnabled,
+			&cfg.CreatedAt,
+			&cfg.UpdatedAt,
+			&merchantName,
+			&merchantEmail,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan routing row: %w", err)
+		}
+		result = append(result, RoutingRow{
+			Config:        cfg,
+			MerchantName:  merchantName,
+			MerchantEmail: merchantEmail,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}

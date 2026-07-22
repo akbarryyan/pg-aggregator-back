@@ -22,14 +22,14 @@ CREATE TABLE IF NOT EXISTS payments (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_payments_reference ON payments(reference);
-CREATE INDEX idx_payments_merchant_id ON payments(merchant_id);
-CREATE INDEX idx_payments_provider_reference ON payments(provider_reference);
-CREATE INDEX idx_payments_status ON payments(status);
-CREATE INDEX idx_payments_payment_method ON payments(payment_method);
-CREATE INDEX idx_payments_created_at ON payments(created_at DESC);
-CREATE INDEX idx_payments_expires_at ON payments(expires_at);
-CREATE INDEX idx_payments_merchant_status ON payments(merchant_id, status);
+CREATE INDEX IF NOT EXISTS idx_payments_reference ON payments(reference);
+CREATE INDEX IF NOT EXISTS idx_payments_merchant_id ON payments(merchant_id);
+CREATE INDEX IF NOT EXISTS idx_payments_provider_reference ON payments(provider_reference);
+CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
+CREATE INDEX IF NOT EXISTS idx_payments_payment_method ON payments(payment_method);
+CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payments_expires_at ON payments(expires_at);
+CREATE INDEX IF NOT EXISTS idx_payments_merchant_status ON payments(merchant_id, status);
 
 COMMENT ON TABLE payments IS 'Stores payment transactions';
 COMMENT ON COLUMN payments.reference IS 'Internal unique payment reference';

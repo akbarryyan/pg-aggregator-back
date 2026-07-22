@@ -13,9 +13,9 @@ CREATE TABLE IF NOT EXISTS merchants (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_merchants_email ON merchants(email);
-CREATE INDEX idx_merchants_is_active ON merchants(is_active);
-CREATE INDEX idx_merchants_created_at ON merchants(created_at);
+CREATE INDEX IF NOT EXISTS idx_merchants_email ON merchants(email);
+CREATE INDEX IF NOT EXISTS idx_merchants_is_active ON merchants(is_active);
+CREATE INDEX IF NOT EXISTS idx_merchants_created_at ON merchants(created_at);
 
 COMMENT ON TABLE merchants IS 'Stores merchant and business information';
 COMMENT ON COLUMN merchants.id IS 'Unique merchant identifier (UUID)';

@@ -9,17 +9,16 @@ import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
-	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
 )
 
 type PaymentService struct {
-	paymentRepo                *repository.PaymentRepository
-	merchantRepo               *repository.MerchantRepository
-	merchantProviderConfigRepo *repository.MerchantProviderConfigRepository
-	webhookEventRepo           *repository.WebhookEventRepository
-	callbackRepo               *repository.MerchantCallbackRepository
+	paymentRepo                paymentRepository
+	merchantRepo               merchantRepository
+	merchantProviderConfigRepo merchantProviderConfigRepository
+	webhookEventRepo           webhookEventRepository
+	callbackRepo               merchantCallbackRepository
 	providerRouter             *providerPkg.ProviderRouter
 	sandboxProvider            providerPkg.PaymentProvider
 	appBaseURL                 string
@@ -31,9 +30,9 @@ type providerCandidate struct {
 }
 
 func NewPaymentService(
-	paymentRepo *repository.PaymentRepository,
-	merchantProviderConfigRepo *repository.MerchantProviderConfigRepository,
-	webhookEventRepo *repository.WebhookEventRepository,
+	paymentRepo paymentRepository,
+	merchantProviderConfigRepo merchantProviderConfigRepository,
+	webhookEventRepo webhookEventRepository,
 	providerRouter *providerPkg.ProviderRouter,
 	appBaseURL string,
 ) *PaymentService {
@@ -48,8 +47,8 @@ func NewPaymentService(
 
 // WithMerchantCallbackDeps wires merchant lookup + outbound callback persistence.
 func (s *PaymentService) WithMerchantCallbackDeps(
-	merchantRepo *repository.MerchantRepository,
-	callbackRepo *repository.MerchantCallbackRepository,
+	merchantRepo merchantRepository,
+	callbackRepo merchantCallbackRepository,
 ) *PaymentService {
 	s.merchantRepo = merchantRepo
 	s.callbackRepo = callbackRepo

@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"errors"
 	"io"
 	"net/http"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/gorilla/mux"
@@ -40,6 +42,13 @@ func (h *WebhookHandler) HandleProviderWebhook(w http.ResponseWriter, r *http.Re
 
 	if err := h.paymentService.ProcessWebhook(r.Context(), providerName, rawPayload, signature); err != nil {
 		logger.Errorf("Failed to process webhook: %v", err)
+		if errors.Is(err, payment.ErrDuplicateWebhook) || errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
+			respondJSON(w, http.StatusOK, map[string]string{
+				"status":  "ignored",
+				"message": "Webhook already processed",
+			})
+			return
+		}
 
 		respondError(w, http.StatusBadRequest, "Webhook processing failed")
 		return

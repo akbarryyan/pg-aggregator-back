@@ -105,27 +105,31 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, providerName string
 	return nil
 }
 
+// ExpirePayments marks pending payments whose expires_at has passed as
+// expired. It queries by status+expires_at directly (not a scan of the most
+// recent N payments of any status), so it still finds old stragglers once
+// payment volume grows past a single page.
 func (s *PaymentService) ExpirePayments(ctx context.Context) error {
-	logger.Info("Running payment expiration job")
+	const batchSize = 200
 
-	payments, err := s.paymentRepo.List(ctx, 100, 0)
+	payments, err := s.paymentRepo.ListExpiredPending(ctx, time.Now(), batchSize)
 	if err != nil {
-		return fmt.Errorf("failed to list payments: %w", err)
+		return fmt.Errorf("failed to list expired pending payments: %w", err)
 	}
 
 	expiredCount := 0
 	for _, p := range payments {
-		if p.Status == payment.StatusPending && time.Now().After(p.ExpiresAt) {
-			logger.Infof("Expiring payment: %s", p.Reference)
-			if err := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusExpired, nil); err != nil {
-				logger.Errorf("Failed to expire payment %s: %v", p.Reference, err)
-				continue
-			}
-			expiredCount++
+		logger.Infof("Expiring payment: %s", p.Reference)
+		if err := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusExpired, nil); err != nil {
+			logger.Errorf("Failed to expire payment %s: %v", p.Reference, err)
+			continue
 		}
+		expiredCount++
 	}
 
-	logger.Infof("Expired %d payments", expiredCount)
+	if expiredCount > 0 {
+		logger.Infof("Expired %d payments", expiredCount)
+	}
 	return nil
 }
 

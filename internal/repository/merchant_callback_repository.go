@@ -143,6 +143,39 @@ func (r *MerchantCallbackRepository) ListFiltered(
 	return items, rows.Err()
 }
 
+// ListDueForRetry returns failed deliveries whose next_retry_at has passed.
+// Deliveries with next_retry_at = NULL (retry cap already reached, see
+// executeCallbackDelivery) are excluded automatically since NULL <= $1 is
+// never true in SQL.
+func (r *MerchantCallbackRepository) ListDueForRetry(ctx context.Context, before time.Time, limit int) ([]merchant.CallbackDelivery, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, payment_id, merchant_id, event_type, target_url, request_payload,
+		       attempt_number, status, http_status, response_body, error_message,
+		       delivered_at, next_retry_at, created_at, updated_at
+		FROM merchant_callback_deliveries
+		WHERE status = $1 AND next_retry_at IS NOT NULL AND next_retry_at <= $2
+		ORDER BY next_retry_at ASC
+		LIMIT $3
+	`, merchant.CallbackStatusFailed, before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list due callback retries: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]merchant.CallbackDelivery, 0)
+	for rows.Next() {
+		d, err := scanCallbackDelivery(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *d)
+	}
+	return items, rows.Err()
+}
+
 func (r *MerchantCallbackRepository) CountFiltered(
 	ctx context.Context,
 	status string,

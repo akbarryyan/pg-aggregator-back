@@ -2,12 +2,14 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
@@ -50,7 +52,7 @@ func (h *PaymentHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	p, err := h.paymentService.CreatePayment(r.Context(), &req)
 	if err != nil {
 		logger.Errorf("Failed to create payment: %v", err)
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreatePaymentError(w, err)
 		return
 	}
 
@@ -108,16 +110,16 @@ func (h *PaymentHandler) GetPaymentByReference(w http.ResponseWriter, r *http.Re
 	}
 	// Public-safe subset (still includes QR for checkout UX)
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"id":            p.ID,
-		"reference":     p.Reference,
-		"amount":        p.Amount,
-		"currency":      p.Currency,
-		"status":        p.Status,
-		"description":   p.Description,
+		"id":             p.ID,
+		"reference":      p.Reference,
+		"amount":         p.Amount,
+		"currency":       p.Currency,
+		"status":         p.Status,
+		"description":    p.Description,
 		"payment_method": p.PaymentMethod,
-		"environment":   payment.NormalizeEnvironment(p.Environment),
-		"qris_data":     p.QRISData,
-		"expires_at":    p.ExpiresAt.UTC().Format(time.RFC3339),
+		"environment":    payment.NormalizeEnvironment(p.Environment),
+		"qris_data":      p.QRISData,
+		"expires_at":     p.ExpiresAt.UTC().Format(time.RFC3339),
 		"paid_at": func() interface{} {
 			if p.PaidAt == nil {
 				return nil
@@ -187,4 +189,17 @@ func respondError(w http.ResponseWriter, statusCode int, message string) {
 		Error:   http.StatusText(statusCode),
 		Message: message,
 	})
+}
+
+func respondCreatePaymentError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, providerPkg.ErrProviderNotAvailable):
+		respondError(w, http.StatusServiceUnavailable, "Payment provider is temporarily unavailable")
+	case errors.Is(err, providerPkg.ErrUnsupportedPaymentMethod):
+		respondError(w, http.StatusBadRequest, "Unsupported payment method")
+	case errors.Is(err, payment.ErrProviderError):
+		respondError(w, http.StatusBadGateway, "Payment provider error")
+	default:
+		respondError(w, http.StatusInternalServerError, "Failed to create payment")
+	}
 }

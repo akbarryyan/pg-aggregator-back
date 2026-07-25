@@ -17,6 +17,7 @@ import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/provider/cashi"
 	"github.com/akbarryyan/pg-aggregator-back/internal/provider/sandbox"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
+	"github.com/akbarryyan/pg-aggregator-back/internal/scheduler"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 
@@ -84,7 +85,32 @@ func main() {
 	authMiddleware := middleware.NewAuthMiddleware(authService)
 	merchantAPIAuth := middleware.NewMerchantAPIAuthMiddleware(apiKeyService)
 
-	router := setupRouter(paymentHandler, webhookHandler, providerRoutingHandler, authHandler, adminHandler, merchantHandler, authMiddleware, merchantAPIAuth)
+	// Rate limiting on public endpoints (per system-design.md's security
+	// rules): login is the classic brute-force target so it gets a tight
+	// budget; webhook/checkout-polling/merchant-API get a looser one just
+	// to blunt flooding, since they're otherwise legitimate high-frequency
+	// traffic. Per-IP, in-process — see internal/middleware/rate_limit.go.
+	authRateLimiter := middleware.NewIPRateLimiter(5, 5)      // 5 req/min, burst 5
+	publicRateLimiter := middleware.NewIPRateLimiter(120, 30) // 120 req/min, burst 30
+
+	// Background jobs: expire unpaid payments past their deadline, auto-retry
+	// failed merchant callbacks, and evict idle rate-limit buckets. A single
+	// in-process ticker is enough at this stage (see internal/scheduler) — no
+	// Redis/Asynq needed until the API runs as more than one instance.
+	bgCtx, cancelBackgroundJobs := context.WithCancel(context.Background())
+	defer cancelBackgroundJobs()
+	go scheduler.RunPeriodic(bgCtx, time.Minute, "expire-payments", paymentService.ExpirePayments)
+	go scheduler.RunPeriodic(bgCtx, time.Minute, "retry-merchant-callbacks", func(ctx context.Context) error {
+		_, err := paymentService.RetryDueMerchantCallbacks(ctx, 50)
+		return err
+	})
+	go scheduler.RunPeriodic(bgCtx, 10*time.Minute, "rate-limiter-cleanup", func(ctx context.Context) error {
+		authRateLimiter.Cleanup(30 * time.Minute)
+		publicRateLimiter.Cleanup(30 * time.Minute)
+		return nil
+	})
+
+	router := setupRouter(paymentHandler, webhookHandler, providerRoutingHandler, authHandler, adminHandler, merchantHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter)
 
 	c := cors.New(cors.Options{
 		AllowedOrigins:   []string{cfg.App.FrontendURL},
@@ -116,6 +142,7 @@ func main() {
 	<-quit
 
 	logger.Info("Shutting down server...")
+	cancelBackgroundJobs()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -154,18 +181,20 @@ func setupRouter(
 	merchantHandler *handler.MerchantHandler,
 	authMiddleware *middleware.AuthMiddleware,
 	merchantAPIAuth *middleware.MerchantAPIAuthMiddleware,
+	authRateLimiter *middleware.IPRateLimiter,
+	publicRateLimiter *middleware.IPRateLimiter,
 ) *mux.Router {
 	r := mux.NewRouter()
 
 	api := r.PathPrefix("/api/v1").Subrouter()
 
-	// Merchant dashboard login (public)
-	api.HandleFunc("/auth/login", authHandler.LoginMerchant).Methods("POST")
+	// Merchant dashboard login (public) — rate limited, classic brute-force target.
+	api.Handle("/auth/login", authRateLimiter.Limit(http.HandlerFunc(authHandler.LoginMerchant))).Methods("POST")
 	api.HandleFunc("/auth/me", authHandler.GetMerchantMe).Methods("GET")
 	api.HandleFunc("/auth/profile", authHandler.UpdateMerchantProfile).Methods("PUT")
 	api.HandleFunc("/auth/change-password", authHandler.ChangeMerchantPassword).Methods("POST")
 
-	api.HandleFunc("/auth/admin/login", authHandler.LoginAdmin).Methods("POST")
+	api.Handle("/auth/admin/login", authRateLimiter.Limit(http.HandlerFunc(authHandler.LoginAdmin))).Methods("POST")
 	api.HandleFunc("/auth/admin/me", authHandler.GetMe).Methods("GET")
 	api.HandleFunc("/auth/admin/profile", authHandler.UpdateProfile).Methods("PUT")
 	api.HandleFunc("/auth/admin/change-password", authHandler.ChangePassword).Methods("POST")
@@ -225,17 +254,22 @@ func setupRouter(
 	merchantDash.HandleFunc("/business", merchantHandler.GetBusiness).Methods("GET")
 	merchantDash.HandleFunc("/business", merchantHandler.UpdateBusiness).Methods("PUT")
 
-	// Public checkout (no auth) — shareable payment link
-	api.HandleFunc("/public/payments/by-reference/{reference}", paymentHandler.GetPaymentByReference).Methods("GET")
+	// Public checkout (no auth) — shareable payment link, polled by the checkout page.
+	api.Handle("/public/payments/by-reference/{reference}", publicRateLimiter.Limit(http.HandlerFunc(paymentHandler.GetPaymentByReference))).Methods("GET")
 
-	// Merchant public API (API key required)
+	// Merchant public API (API key required). Rate limit runs before the
+	// (DB-hitting) API key auth check, so a flood of bad keys can't be used
+	// to hammer the database.
 	merchantAPI := api.PathPrefix("").Subrouter()
+	merchantAPI.Use(publicRateLimiter.Limit)
 	merchantAPI.Use(merchantAPIAuth.RequireMerchantAPIKey)
 	merchantAPI.HandleFunc("/payments", paymentHandler.CreatePayment).Methods("POST")
 	merchantAPI.HandleFunc("/payments/{id}", paymentHandler.GetPayment).Methods("GET")
 	merchantAPI.HandleFunc("/payments/{id}/status", paymentHandler.GetPaymentStatus).Methods("GET")
 
-	api.HandleFunc("/provider-webhooks/{providerName}", webhookHandler.HandleProviderWebhook).Methods("POST")
+	// Provider webhook (e.g. Cashi) — signature-verified downstream, but still
+	// rate limited per source IP to blunt flooding/DoS attempts.
+	api.Handle("/provider-webhooks/{providerName}", publicRateLimiter.Limit(http.HandlerFunc(webhookHandler.HandleProviderWebhook))).Methods("POST")
 	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.ListMerchantProviderConfigs).Methods("GET")
 	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.UpsertMerchantProviderConfig).Methods("POST", "PUT")
 	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.DeleteMerchantProviderConfig).Methods("DELETE")

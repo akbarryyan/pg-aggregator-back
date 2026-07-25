@@ -16,6 +16,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// maxCallbackAttempts caps auto-retry: once a delivery has failed this many
+// times, NextRetryAt is left unset so RetryDueMerchantCallbacks stops
+// picking it up. Admins can still retry it manually from the dashboard.
+const maxCallbackAttempts = 5
+
 // NotifyMerchantPaymentEvent sends an outbound callback when payment status changes.
 // Prefer payment.callback_url, else merchant.webhook_url. Skips if neither is set.
 func (s *PaymentService) NotifyMerchantPaymentEvent(ctx context.Context, p *payment.Payment, eventType string) {
@@ -107,6 +112,13 @@ func (s *PaymentService) RetryMerchantCallback(ctx context.Context, id uuid.UUID
 		return nil, err
 	}
 	s.executeCallbackDelivery(ctx, retry)
+
+	// A new attempt now exists for this failure — clear the source
+	// delivery's retry schedule so RetryDueMerchantCallbacks doesn't pick
+	// the same failure up again on the next tick.
+	existing.NextRetryAt = nil
+	_ = s.callbackRepo.UpdateResult(ctx, existing)
+
 	return retry, nil
 }
 
@@ -138,8 +150,7 @@ func (s *PaymentService) executeCallbackDelivery(ctx context.Context, d *merchan
 		msg := err.Error()
 		d.Status = merchant.CallbackStatusFailed
 		d.ErrorMessage = &msg
-		next := time.Now().UTC().Add(5 * time.Minute)
-		d.NextRetryAt = &next
+		d.NextRetryAt = nextRetryAt(d.AttemptNumber)
 		_ = s.callbackRepo.UpdateResult(ctx, d)
 		logger.Warnf("Merchant callback failed for %s → %s: %v", d.PaymentID, d.TargetURL, err)
 		return
@@ -165,11 +176,43 @@ func (s *PaymentService) executeCallbackDelivery(ctx context.Context, d *merchan
 		d.Status = merchant.CallbackStatusFailed
 		msg := fmt.Sprintf("unexpected HTTP status %d", statusCode)
 		d.ErrorMessage = &msg
-		next := now.Add(5 * time.Minute)
-		d.NextRetryAt = &next
+		d.NextRetryAt = nextRetryAt(d.AttemptNumber)
 		logger.Warnf("Merchant callback HTTP %d for payment %s", statusCode, d.PaymentID)
 	}
 	_ = s.callbackRepo.UpdateResult(ctx, d)
+}
+
+// nextRetryAt returns when the next auto-retry should happen, or nil once
+// attemptNumber has reached maxCallbackAttempts (stops ListDueForRetry from
+// picking the delivery back up).
+func nextRetryAt(attemptNumber int) *time.Time {
+	if attemptNumber >= maxCallbackAttempts {
+		return nil
+	}
+	next := time.Now().UTC().Add(5 * time.Minute)
+	return &next
+}
+
+// RetryDueMerchantCallbacks re-attempts failed callback deliveries whose
+// next_retry_at has passed. Best-effort per item: one delivery failing to
+// retry does not stop the rest of the batch. Returns how many were attempted.
+func (s *PaymentService) RetryDueMerchantCallbacks(ctx context.Context, limit int) (int, error) {
+	if s.callbackRepo == nil {
+		return 0, nil
+	}
+
+	due, err := s.callbackRepo.ListDueForRetry(ctx, time.Now().UTC(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("failed to list due callback retries: %w", err)
+	}
+
+	for _, d := range due {
+		if _, err := s.RetryMerchantCallback(ctx, d.ID); err != nil {
+			logger.Errorf("Failed to auto-retry callback %s: %v", d.ID, err)
+		}
+	}
+
+	return len(due), nil
 }
 
 func eventTypeForStatus(status string) string {

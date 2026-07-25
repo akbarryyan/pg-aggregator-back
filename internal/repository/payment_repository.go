@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/google/uuid"
@@ -109,6 +110,37 @@ func (r *PaymentRepository) List(ctx context.Context, limit, offset int) ([]*pay
 	rows, err := r.db.QueryContext(ctx, query, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list payments: %w", err)
+	}
+	defer rows.Close()
+
+	var payments []*payment.Payment
+	for rows.Next() {
+		p := &payment.Payment{}
+		if err := scanPayment(rows, p); err != nil {
+			return nil, fmt.Errorf("failed to scan payment: %w", err)
+		}
+		payments = append(payments, p)
+	}
+	return payments, nil
+}
+
+// ListExpiredPending returns pending payments whose expires_at has already
+// passed, oldest deadline first. Used by the expiry job — filtering by
+// status+expires_at in SQL (instead of scanning the most recent N payments
+// of any status) so it still finds old stragglers once payment volume grows.
+func (r *PaymentRepository) ListExpiredPending(ctx context.Context, before time.Time, limit int) ([]*payment.Payment, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	query := `SELECT ` + paymentSelectCols + `
+		FROM payments
+		WHERE status = $1 AND expires_at < $2
+		ORDER BY expires_at ASC
+		LIMIT $3
+	`
+	rows, err := r.db.QueryContext(ctx, query, payment.StatusPending, before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list expired pending payments: %w", err)
 	}
 	defer rows.Close()
 

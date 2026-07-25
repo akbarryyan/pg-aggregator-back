@@ -37,10 +37,31 @@ type MerchantClaims struct {
 	jwt.RegisteredClaims
 }
 
+// authMerchantRepository and authMerchantUserRepository capture exactly the
+// repository methods AuthService depends on, so tests can substitute
+// in-memory fakes instead of a live Postgres connection — same pattern as
+// PaymentService's interfaces in interfaces.go. Concrete *repository.X types
+// already satisfy these implicitly; main.go needs no changes.
+type authMerchantRepository interface {
+	GetByID(ctx context.Context, id uuid.UUID) (*merchant.Merchant, error)
+	GetByEmail(ctx context.Context, email string) (*merchant.Merchant, error)
+	Create(ctx context.Context, req *merchant.CreateMerchantRequest) (*merchant.Merchant, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+}
+
+type authMerchantUserRepository interface {
+	GetByEmail(ctx context.Context, email string) (*merchant.User, error)
+	GetByID(ctx context.Context, id uuid.UUID) (*merchant.User, error)
+	UpdateLastLoginAt(ctx context.Context, id uuid.UUID, at time.Time) error
+	UpdateProfile(ctx context.Context, id uuid.UUID, name, email string) error
+	UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash string) error
+	Create(ctx context.Context, u *merchant.User) (*merchant.User, error)
+}
+
 type AuthService struct {
 	adminRepo        *repository.AdminRepository
-	merchantUserRepo *repository.MerchantUserRepository
-	merchantRepo     *repository.MerchantRepository
+	merchantUserRepo authMerchantUserRepository
+	merchantRepo     authMerchantRepository
 	jwtSecret        []byte
 }
 
@@ -52,8 +73,8 @@ func NewAuthService(adminRepo *repository.AdminRepository, jwtSecret string) *Au
 }
 
 func (s *AuthService) WithMerchantAuth(
-	merchantUserRepo *repository.MerchantUserRepository,
-	merchantRepo *repository.MerchantRepository,
+	merchantUserRepo authMerchantUserRepository,
+	merchantRepo authMerchantRepository,
 ) *AuthService {
 	s.merchantUserRepo = merchantUserRepo
 	s.merchantRepo = merchantRepo
@@ -305,6 +326,62 @@ func (s *AuthService) LoginMerchant(ctx context.Context, req *merchant.UserLogin
 		ExpiresIn: int64(merchantTokenTTL.Seconds()),
 		User:      respUser,
 	}, nil
+}
+
+func (s *AuthService) RegisterMerchant(ctx context.Context, req *merchant.RegisterRequest) (*merchant.MerchantResponse, error) {
+	if s.merchantRepo == nil || s.merchantUserRepo == nil {
+		return nil, fmt.Errorf("merchant auth not configured")
+	}
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+
+	name := strings.TrimSpace(req.Name)
+	businessName := strings.TrimSpace(req.BusinessName)
+	phone := strings.TrimSpace(req.Phone)
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+
+	if _, err := s.merchantRepo.GetByEmail(ctx, email); err == nil {
+		return nil, merchant.ErrMerchantAlreadyExists
+	} else if err != merchant.ErrMerchantNotFound {
+		return nil, err
+	}
+	if _, err := s.merchantUserRepo.GetByEmail(ctx, email); err == nil {
+		return nil, merchant.ErrMerchantAlreadyExists
+	} else if err != merchant.ErrMerchantUserNotFound {
+		return nil, err
+	}
+
+	createdMerchant, err := s.merchantRepo.Create(ctx, &merchant.CreateMerchantRequest{
+		Name:         name,
+		Email:        email,
+		Phone:        phone,
+		BusinessName: businessName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create merchant: %w", err)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		_ = s.merchantRepo.Delete(ctx, createdMerchant.ID)
+		return nil, fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	_, err = s.merchantUserRepo.Create(ctx, &merchant.User{
+		MerchantID:   createdMerchant.ID,
+		Name:         name,
+		Email:        email,
+		PasswordHash: string(hash),
+		Role:         "owner",
+		IsActive:     true,
+	})
+	if err != nil {
+		_ = s.merchantRepo.Delete(ctx, createdMerchant.ID)
+		return nil, fmt.Errorf("failed to create merchant owner account: %w", err)
+	}
+
+	return merchant.ToMerchantResponse(createdMerchant), nil
 }
 
 func (s *AuthService) ParseMerchantToken(tokenString string) (*MerchantClaims, error) {

@@ -2,27 +2,33 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/google/uuid"
 )
 
-func newCallbackTestService(t *testing.T) (*PaymentService, *fakeMerchantCallbackRepo) {
+func newCallbackTestService(t *testing.T) (*PaymentService, *fakeMerchantRepo, *fakeMerchantCallbackRepo) {
 	t.Helper()
 	paymentRepo := newFakePaymentRepo()
 	configRepo := &fakeMerchantProviderConfigRepo{}
 	webhookRepo := newFakeWebhookEventRepo()
 	router := providerPkg.NewProviderRouter()
 
+	merchantRepo := newFakeMerchantRepo()
 	callbackRepo := newFakeMerchantCallbackRepo()
 	svc := NewPaymentService(paymentRepo, configRepo, webhookRepo, router, "http://localhost:8080").
-		WithMerchantCallbackDeps(newFakeMerchantRepo(), callbackRepo)
-	return svc, callbackRepo
+		WithMerchantCallbackDeps(merchantRepo, callbackRepo)
+	return svc, merchantRepo, callbackRepo
 }
 
 func seedCallbackDelivery(repo *fakeMerchantCallbackRepo, status, targetURL string, attemptNumber int, nextRetryAt *time.Time) *merchant.CallbackDelivery {
@@ -49,7 +55,7 @@ func TestRetryDueMerchantCallbacks_OnlyRetriesDueFailedDeliveries(t *testing.T) 
 	}))
 	defer server.Close()
 
-	svc, callbackRepo := newCallbackTestService(t)
+	svc, _, callbackRepo := newCallbackTestService(t)
 
 	past := time.Now().UTC().Add(-1 * time.Minute)
 	future := time.Now().UTC().Add(10 * time.Minute)
@@ -80,7 +86,7 @@ func TestRetryDueMerchantCallbacks_ClearsSourceRetrySchedule(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, callbackRepo := newCallbackTestService(t)
+	svc, _, callbackRepo := newCallbackTestService(t)
 	past := time.Now().UTC().Add(-1 * time.Minute)
 	due := seedCallbackDelivery(callbackRepo, merchant.CallbackStatusFailed, server.URL, 1, &past)
 
@@ -112,7 +118,7 @@ func TestRetryMerchantCallback_StopsSchedulingAfterMaxAttempts(t *testing.T) {
 	}))
 	defer server.Close()
 
-	svc, callbackRepo := newCallbackTestService(t)
+	svc, _, callbackRepo := newCallbackTestService(t)
 	past := time.Now().UTC().Add(-1 * time.Minute)
 	// Already at the last allowed attempt before the cap.
 	due := seedCallbackDelivery(callbackRepo, merchant.CallbackStatusFailed, server.URL, maxCallbackAttempts, &past)
@@ -145,3 +151,94 @@ func TestRetryDueMerchantCallbacks_NoopWithoutCallbackDeps(t *testing.T) {
 		t.Errorf("expected count 0 when callback deps are not wired, got %d", count)
 	}
 }
+
+func TestEnsureMerchantWebhookSecret_GeneratesOnceAndPersists(t *testing.T) {
+	svc, merchantRepo, _ := newCallbackTestService(t)
+	merchantID := uuid.New()
+	merchantRepo.byID[merchantID] = &merchant.Merchant{ID: merchantID}
+
+	first, err := svc.EnsureMerchantWebhookSecret(context.Background(), merchantID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if first == "" {
+		t.Fatalf("expected a non-empty generated secret")
+	}
+	if merchantRepo.byID[merchantID].WebhookSecret == nil || *merchantRepo.byID[merchantID].WebhookSecret != first {
+		t.Fatalf("expected generated secret to be persisted on the merchant record")
+	}
+
+	second, err := svc.EnsureMerchantWebhookSecret(context.Background(), merchantID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if second != first {
+		t.Errorf("expected EnsureMerchantWebhookSecret to be idempotent, got %q then %q", first, second)
+	}
+}
+
+func TestRegenerateMerchantWebhookSecret_ProducesDifferentSecret(t *testing.T) {
+	svc, merchantRepo, _ := newCallbackTestService(t)
+	merchantID := uuid.New()
+	merchantRepo.byID[merchantID] = &merchant.Merchant{ID: merchantID}
+
+	first, err := svc.EnsureMerchantWebhookSecret(context.Background(), merchantID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	second, err := svc.RegenerateMerchantWebhookSecret(context.Background(), merchantID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if second == first {
+		t.Errorf("expected regenerate to produce a different secret, got the same value twice")
+	}
+	if merchantRepo.byID[merchantID].WebhookSecret == nil || *merchantRepo.byID[merchantID].WebhookSecret != second {
+		t.Errorf("expected regenerated secret to overwrite the persisted one")
+	}
+}
+
+func TestExecuteCallbackDelivery_SignsPayloadWithHMAC(t *testing.T) {
+	var gotSignature string
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSignature = r.Header.Get("X-PG-Signature")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	svc, merchantRepo, _ := newCallbackTestService(t)
+	merchantID := uuid.New()
+	merchantRepo.byID[merchantID] = &merchant.Merchant{ID: merchantID}
+
+	payload := &payment.Payment{
+		ID:          uuid.New(),
+		Reference:   "PAY-SIGN-1",
+		MerchantID:  merchantID,
+		Status:      payment.StatusPaid,
+		Amount:      15000,
+		Currency:    payment.CurrencyIDR,
+		CallbackURL: strPtr(server.URL),
+	}
+	svc.NotifyMerchantPaymentEvent(context.Background(), payload, "payment.paid")
+
+	if gotSignature == "" {
+		t.Fatalf("expected X-PG-Signature header to be set")
+	}
+
+	secret, err := svc.EnsureMerchantWebhookSecret(context.Background(), merchantID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write(gotBody)
+	want := hex.EncodeToString(h.Sum(nil))
+
+	if gotSignature != want {
+		t.Errorf("signature mismatch: server received %q, recomputed %q from the merchant's own secret", gotSignature, want)
+	}
+}
+
+func strPtr(s string) *string { return &s }

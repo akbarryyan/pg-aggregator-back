@@ -408,3 +408,37 @@ func (h *MerchantHandler) UpdateBusiness(w http.ResponseWriter, r *http.Request)
 	}
 	respondJSON(w, http.StatusOK, m)
 }
+
+// GetWebhookSecret returns the merchant's HMAC signing secret for outbound
+// payment webhooks, generating one on first access.
+func (h *MerchantHandler) GetWebhookSecret(w http.ResponseWriter, r *http.Request) {
+	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	secret, err := h.paymentService.EnsureMerchantWebhookSecret(r.Context(), merchantID)
+	if err != nil {
+		logger.Errorf("Failed to get webhook secret for merchant %s: %v", merchantID, err)
+		respondError(w, http.StatusInternalServerError, "Failed to load webhook secret")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"webhook_secret": secret})
+}
+
+// RegenerateWebhookSecret issues a new signing secret, invalidating the
+// previous one immediately.
+func (h *MerchantHandler) RegenerateWebhookSecret(w http.ResponseWriter, r *http.Request) {
+	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	secret, err := h.paymentService.RegenerateMerchantWebhookSecret(r.Context(), merchantID)
+	if err != nil {
+		logger.Errorf("Failed to regenerate webhook secret for merchant %s: %v", merchantID, err)
+		respondError(w, http.StatusInternalServerError, "Failed to regenerate webhook secret")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"webhook_secret": secret})
+}

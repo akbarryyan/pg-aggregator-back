@@ -53,6 +53,7 @@ type webhookEventRepository interface {
 
 type merchantRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*merchant.Merchant, error)
+	SetWebhookSecret(ctx context.Context, id uuid.UUID, secret string) error
 }
 
 type merchantCallbackRepository interface {

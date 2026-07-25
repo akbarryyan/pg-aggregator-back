@@ -253,6 +253,8 @@ func setupRouter(
 	merchantDash.HandleFunc("/api-keys/{keyId}", merchantHandler.DeleteAPIKey).Methods("DELETE")
 	merchantDash.HandleFunc("/business", merchantHandler.GetBusiness).Methods("GET")
 	merchantDash.HandleFunc("/business", merchantHandler.UpdateBusiness).Methods("PUT")
+	merchantDash.HandleFunc("/webhook-secret", merchantHandler.GetWebhookSecret).Methods("GET")
+	merchantDash.HandleFunc("/webhook-secret/regenerate", merchantHandler.RegenerateWebhookSecret).Methods("POST")
 
 	// Public checkout (no auth) — shareable payment link, polled by the checkout page.
 	api.Handle("/public/payments/by-reference/{reference}", publicRateLimiter.Limit(http.HandlerFunc(paymentHandler.GetPaymentByReference))).Methods("GET")

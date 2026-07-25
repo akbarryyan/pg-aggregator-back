@@ -232,6 +232,15 @@ func (f *fakeMerchantRepo) GetByID(ctx context.Context, id uuid.UUID) (*merchant
 	return m, nil
 }
 
+func (f *fakeMerchantRepo) SetWebhookSecret(ctx context.Context, id uuid.UUID, secret string) error {
+	m, ok := f.byID[id]
+	if !ok {
+		return nil // mirrors a real UPDATE matching 0 rows: no error
+	}
+	m.WebhookSecret = &secret
+	return nil
+}
+
 // ---- fakeMerchantCallbackRepo -------------------------------------------
 
 type fakeMerchantCallbackRepo struct {

@@ -7,15 +7,19 @@ import (
 )
 
 type Merchant struct {
-	ID          uuid.UUID  `json:"id" db:"id"`
-	Name        string     `json:"name" db:"name"`
-	Email       string     `json:"email" db:"email"`
-	Phone       string     `json:"phone" db:"phone"`
+	ID           uuid.UUID `json:"id" db:"id"`
+	Name         string    `json:"name" db:"name"`
+	Email        string    `json:"email" db:"email"`
+	Phone        string    `json:"phone" db:"phone"`
 	BusinessName string    `json:"business_name" db:"business_name"`
-	WebhookURL  *string    `json:"webhook_url,omitempty" db:"webhook_url"`
-	IsActive    bool       `json:"is_active" db:"is_active"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
+	WebhookURL   *string   `json:"webhook_url,omitempty" db:"webhook_url"`
+	// WebhookSecret signs outbound payment webhooks (X-PG-Signature). Never
+	// serialized as part of the general merchant representation — only the
+	// dedicated GET/regenerate webhook-secret endpoints expose it.
+	WebhookSecret *string   `json:"-" db:"webhook_secret"`
+	IsActive      bool      `json:"is_active" db:"is_active"`
+	CreatedAt     time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
 }
 
 type CreateMerchantRequest struct {
@@ -47,15 +51,15 @@ type UpdateMerchantRequest struct {
 }
 
 type MerchantResponse struct {
-	ID           uuid.UUID  `json:"id"`
-	Name         string     `json:"name"`
-	Email        string     `json:"email"`
-	Phone        string     `json:"phone"`
-	BusinessName string     `json:"business_name"`
-	WebhookURL   *string    `json:"webhook_url,omitempty"`
-	IsActive     bool       `json:"is_active"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID           uuid.UUID `json:"id"`
+	Name         string    `json:"name"`
+	Email        string    `json:"email"`
+	Phone        string    `json:"phone"`
+	BusinessName string    `json:"business_name"`
+	WebhookURL   *string   `json:"webhook_url,omitempty"`
+	IsActive     bool      `json:"is_active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 func ToMerchantResponse(m *Merchant) *MerchantResponse {

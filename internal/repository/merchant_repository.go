@@ -52,13 +52,13 @@ func (r *MerchantRepository) GetByID(ctx context.Context, id uuid.UUID) (*mercha
 	m := &merchant.Merchant{}
 
 	query := `
-		SELECT id, name, email, phone, business_name, webhook_url, is_active, created_at, updated_at
+		SELECT id, name, email, phone, business_name, webhook_url, webhook_secret, is_active, created_at, updated_at
 		FROM merchants
 		WHERE id = $1
 	`
 
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
-		&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.IsActive, &m.CreatedAt, &m.UpdatedAt,
+		&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.WebhookSecret, &m.IsActive, &m.CreatedAt, &m.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -69,6 +69,17 @@ func (r *MerchantRepository) GetByID(ctx context.Context, id uuid.UUID) (*mercha
 	}
 
 	return m, nil
+}
+
+// SetWebhookSecret persists the HMAC signing secret for outbound payment
+// webhooks. See PaymentService.EnsureMerchantWebhookSecret for generation.
+func (r *MerchantRepository) SetWebhookSecret(ctx context.Context, id uuid.UUID, secret string) error {
+	query := `UPDATE merchants SET webhook_secret = $1, updated_at = $2 WHERE id = $3`
+	_, err := r.db.ExecContext(ctx, query, secret, time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("failed to set merchant webhook secret: %w", err)
+	}
+	return nil
 }
 
 func (r *MerchantRepository) GetByEmail(ctx context.Context, email string) (*merchant.Merchant, error) {

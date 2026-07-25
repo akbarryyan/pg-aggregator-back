@@ -195,6 +195,7 @@ func setupRouter(
 
 	// Merchant dashboard login (public) — rate limited, classic brute-force target.
 	api.Handle("/auth/login", authRateLimiter.Limit(http.HandlerFunc(authHandler.LoginMerchant))).Methods("POST")
+	api.Handle("/auth/register", authRateLimiter.Limit(http.HandlerFunc(authHandler.RegisterMerchant))).Methods("POST")
 	api.HandleFunc("/auth/me", authHandler.GetMerchantMe).Methods("GET")
 	api.HandleFunc("/auth/profile", authHandler.UpdateMerchantProfile).Methods("PUT")
 	api.HandleFunc("/auth/change-password", authHandler.ChangeMerchantPassword).Methods("POST")

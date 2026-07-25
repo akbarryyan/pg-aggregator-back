@@ -150,6 +150,34 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 
 // --- Merchant dashboard auth (used by /login → /dashboard) ---
 
+func (h *AuthHandler) RegisterMerchant(w http.ResponseWriter, r *http.Request) {
+	var req merchant.RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	req.Email = strings.TrimSpace(req.Email)
+
+	resp, err := h.authService.RegisterMerchant(r.Context(), &req)
+	if err != nil {
+		switch err {
+		case merchant.ErrMerchantNameRequired,
+			merchant.ErrBusinessNameRequired,
+			merchant.ErrMerchantEmailRequired,
+			merchant.ErrMerchantPasswordRequired,
+			merchant.ErrMerchantPasswordTooShort:
+			respondError(w, http.StatusBadRequest, err.Error())
+		case merchant.ErrMerchantAlreadyExists:
+			respondError(w, http.StatusConflict, err.Error())
+		default:
+			logger.Errorf("Merchant registration failed: %v", err)
+			respondError(w, http.StatusInternalServerError, "Failed to register")
+		}
+		return
+	}
+	respondJSON(w, http.StatusCreated, resp)
+}
+
 func (h *AuthHandler) LoginMerchant(w http.ResponseWriter, r *http.Request) {
 	var req merchant.UserLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

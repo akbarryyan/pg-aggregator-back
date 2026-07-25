@@ -124,3 +124,69 @@ func TestUserChangePasswordRequest_Validate(t *testing.T) {
 		}
 	})
 }
+
+func TestRegisterRequest_Validate(t *testing.T) {
+	valid := func() *RegisterRequest {
+		return &RegisterRequest{
+			Name:         "Budi Santoso",
+			BusinessName: "Toko Budi Jaya",
+			Email:        "budi@tokobudi.id",
+			Phone:        "08123456789",
+			Password:     "supersecret1",
+		}
+	}
+
+	t.Run("valid request passes", func(t *testing.T) {
+		if err := valid().Validate(); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	})
+
+	t.Run("name required", func(t *testing.T) {
+		req := valid()
+		req.Name = "  "
+		if err := req.Validate(); err != ErrMerchantNameRequired {
+			t.Fatalf("expected ErrMerchantNameRequired, got %v", err)
+		}
+	})
+
+	t.Run("business name required", func(t *testing.T) {
+		req := valid()
+		req.BusinessName = ""
+		if err := req.Validate(); err != ErrBusinessNameRequired {
+			t.Fatalf("expected ErrBusinessNameRequired, got %v", err)
+		}
+	})
+
+	t.Run("email required", func(t *testing.T) {
+		req := valid()
+		req.Email = ""
+		if err := req.Validate(); err != ErrMerchantEmailRequired {
+			t.Fatalf("expected ErrMerchantEmailRequired, got %v", err)
+		}
+	})
+
+	t.Run("password required", func(t *testing.T) {
+		req := valid()
+		req.Password = ""
+		if err := req.Validate(); err != ErrMerchantPasswordRequired {
+			t.Fatalf("expected ErrMerchantPasswordRequired, got %v", err)
+		}
+	})
+
+	t.Run("password must be at least 8 chars", func(t *testing.T) {
+		req := valid()
+		req.Password = "short1"
+		if err := req.Validate(); err != ErrMerchantPasswordTooShort {
+			t.Fatalf("expected ErrMerchantPasswordTooShort, got %v", err)
+		}
+	})
+
+	t.Run("phone is optional", func(t *testing.T) {
+		req := valid()
+		req.Phone = ""
+		if err := req.Validate(); err != nil {
+			t.Fatalf("expected no error with empty phone, got %v", err)
+		}
+	})
+}

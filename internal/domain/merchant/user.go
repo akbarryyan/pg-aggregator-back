@@ -13,6 +13,7 @@ var (
 	ErrMerchantUserInactive            = errors.New("merchant user is inactive")
 	ErrMerchantInvalidCredentials      = errors.New("invalid email or password")
 	ErrMerchantPasswordRequired        = errors.New("password is required")
+	ErrMerchantPasswordTooShort        = errors.New("password must be at least 8 characters")
 	ErrMerchantCurrentPasswordRequired = errors.New("current password is required")
 	ErrMerchantNewPasswordRequired     = errors.New("new password is required")
 	ErrMerchantNewPasswordTooShort     = errors.New("new password must be at least 8 characters")
@@ -44,6 +45,33 @@ func (r *UserLoginRequest) Validate() error {
 	}
 	if r.Password == "" {
 		return ErrMerchantPasswordRequired
+	}
+	return nil
+}
+
+type RegisterRequest struct {
+	Name         string `json:"name"`
+	BusinessName string `json:"business_name"`
+	Email        string `json:"email"`
+	Phone        string `json:"phone,omitempty"`
+	Password     string `json:"password"`
+}
+
+func (r *RegisterRequest) Validate() error {
+	if strings.TrimSpace(r.Name) == "" {
+		return ErrMerchantNameRequired
+	}
+	if strings.TrimSpace(r.BusinessName) == "" {
+		return ErrBusinessNameRequired
+	}
+	if strings.TrimSpace(r.Email) == "" {
+		return ErrMerchantEmailRequired
+	}
+	if r.Password == "" {
+		return ErrMerchantPasswordRequired
+	}
+	if len(r.Password) < 8 {
+		return ErrMerchantPasswordTooShort
 	}
 	return nil
 }

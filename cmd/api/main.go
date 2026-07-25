@@ -64,9 +64,12 @@ func main() {
 	// Production QRIS routing uses real Cashi only
 	providerRouter.RegisterPaymentMethodProvider("qris", cashiAdapter.GetName())
 
+	paymentLinkRepo := repository.NewPaymentLinkRepository(db)
+
 	paymentService := service.NewPaymentService(paymentRepo, merchantProviderConfigRepo, webhookEventRepo, providerRouter, cfg.App.URL).
 		WithMerchantCallbackDeps(merchantRepo, callbackRepo).
 		WithSandboxProvider(sandboxAdapter)
+	paymentLinkService := service.NewPaymentLinkService(paymentLinkRepo, paymentRepo, paymentService)
 	providerRoutingService := service.NewProviderRoutingService(merchantProviderConfigRepo, providerRouter)
 	authService := service.NewAuthService(adminRepo, cfg.Security.JWTSecret).
 		WithMerchantAuth(merchantUserRepo, merchantRepo)
@@ -82,6 +85,7 @@ func main() {
 		WithAPIKeyService(apiKeyService).
 		WithAuthService(authService)
 	merchantHandler := handler.NewMerchantHandler(adminService, paymentService, apiKeyService, authService, cfg.App.FrontendURL)
+	paymentLinkHandler := handler.NewPaymentLinkHandler(paymentLinkService, cfg.App.FrontendURL)
 	authMiddleware := middleware.NewAuthMiddleware(authService)
 	merchantAPIAuth := middleware.NewMerchantAPIAuthMiddleware(apiKeyService)
 
@@ -110,7 +114,7 @@ func main() {
 		return nil
 	})
 
-	router := setupRouter(paymentHandler, webhookHandler, providerRoutingHandler, authHandler, adminHandler, merchantHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter)
+	router := setupRouter(paymentHandler, webhookHandler, providerRoutingHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter)
 
 	c := cors.New(cors.Options{
 		AllowedOrigins:   []string{cfg.App.FrontendURL},
@@ -179,6 +183,7 @@ func setupRouter(
 	authHandler *handler.AuthHandler,
 	adminHandler *handler.AdminHandler,
 	merchantHandler *handler.MerchantHandler,
+	paymentLinkHandler *handler.PaymentLinkHandler,
 	authMiddleware *middleware.AuthMiddleware,
 	merchantAPIAuth *middleware.MerchantAPIAuthMiddleware,
 	authRateLimiter *middleware.IPRateLimiter,
@@ -255,9 +260,20 @@ func setupRouter(
 	merchantDash.HandleFunc("/business", merchantHandler.UpdateBusiness).Methods("PUT")
 	merchantDash.HandleFunc("/webhook-secret", merchantHandler.GetWebhookSecret).Methods("GET")
 	merchantDash.HandleFunc("/webhook-secret/regenerate", merchantHandler.RegenerateWebhookSecret).Methods("POST")
+	merchantDash.HandleFunc("/payment-links", paymentLinkHandler.ListPaymentLinks).Methods("GET")
+	merchantDash.HandleFunc("/payment-links", paymentLinkHandler.CreatePaymentLink).Methods("POST")
+	merchantDash.HandleFunc("/payment-links/{id}", paymentLinkHandler.GetPaymentLink).Methods("GET")
+	merchantDash.HandleFunc("/payment-links/{id}", paymentLinkHandler.UpdatePaymentLink).Methods("PUT")
+	merchantDash.HandleFunc("/payment-links/{id}/status", paymentLinkHandler.SetPaymentLinkActive).Methods("PUT")
+	merchantDash.HandleFunc("/payment-links/{id}/payments", paymentLinkHandler.ListPaymentLinkPayments).Methods("GET")
 
 	// Public checkout (no auth) — shareable payment link, polled by the checkout page.
 	api.Handle("/public/payments/by-reference/{reference}", publicRateLimiter.Limit(http.HandlerFunc(paymentHandler.GetPaymentByReference))).Methods("GET")
+
+	// Public Payment Link resolve + pay (no auth) — a reusable link; every
+	// checkout here spawns a fresh one-time Payment (see PaymentLinkService).
+	api.Handle("/public/payment-links/{slug}", publicRateLimiter.Limit(http.HandlerFunc(paymentLinkHandler.GetPublicPaymentLink))).Methods("GET")
+	api.Handle("/public/payment-links/{slug}/pay", publicRateLimiter.Limit(http.HandlerFunc(paymentLinkHandler.InitiatePaymentLinkCheckout))).Methods("POST")
 
 	// Merchant public API (API key required). Rate limit runs before the
 	// (DB-hitting) API key auth check, so a flood of bad keys can't be used

@@ -8,6 +8,7 @@ import (
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/paymentlink"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
@@ -124,6 +125,40 @@ func (f *fakePaymentRepo) ListExpiredPending(ctx context.Context, before time.Ti
 		}
 	}
 	return out, nil
+}
+
+func (f *fakePaymentRepo) ListByPaymentLinkID(ctx context.Context, linkID uuid.UUID, limit, offset int) ([]*payment.Payment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*payment.Payment, 0)
+	for _, p := range f.byID {
+		if p.PaymentLinkID == nil || *p.PaymentLinkID != linkID {
+			continue
+		}
+		cp := *p
+		out = append(out, &cp)
+	}
+	if offset < len(out) {
+		out = out[offset:]
+	} else {
+		out = nil
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (f *fakePaymentRepo) CountByPaymentLinkID(ctx context.Context, linkID uuid.UUID) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, p := range f.byID {
+		if p.PaymentLinkID != nil && *p.PaymentLinkID == linkID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (f *fakePaymentRepo) ListAdmin(
@@ -304,8 +339,9 @@ func (f *fakeMerchantCallbackRepo) ListDueForRetry(ctx context.Context, before t
 type fakeProvider struct {
 	name string
 
-	createResp *domainProvider.ProviderPaymentResponse
-	createErr  error
+	createCalls int
+	createResp  *domainProvider.ProviderPaymentResponse
+	createErr   error
 
 	statusResp *domainProvider.NormalizedPaymentStatus
 	statusErr  error
@@ -319,6 +355,7 @@ type fakeProvider struct {
 func (f *fakeProvider) GetName() string { return f.name }
 
 func (f *fakeProvider) CreatePayment(ctx context.Context, req *domainProvider.ProviderPaymentRequest) (*domainProvider.ProviderPaymentResponse, error) {
+	f.createCalls++
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -364,3 +401,132 @@ func (f *fakeProvider) ParseWebhook(rawPayload []byte) (*domainProvider.Provider
 func (f *fakeProvider) NormalizeStatus(providerStatus string) string { return providerStatus }
 
 var _ providerPkg.PaymentProvider = (*fakeProvider)(nil)
+
+// ---- fakePaymentLinkRepo --------------------------------------------------
+
+type fakePaymentLinkRepo struct {
+	mu     sync.Mutex
+	byID   map[uuid.UUID]*paymentlink.PaymentLink
+	bySlug map[string]uuid.UUID
+}
+
+func newFakePaymentLinkRepo() *fakePaymentLinkRepo {
+	return &fakePaymentLinkRepo{
+		byID:   map[uuid.UUID]*paymentlink.PaymentLink{},
+		bySlug: map[string]uuid.UUID{},
+	}
+}
+
+func (f *fakePaymentLinkRepo) Create(ctx context.Context, l *paymentlink.PaymentLink) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if l.ID == uuid.Nil {
+		l.ID = uuid.New()
+	}
+	cp := *l
+	f.byID[l.ID] = &cp
+	f.bySlug[l.Slug] = l.ID
+	return nil
+}
+
+func (f *fakePaymentLinkRepo) GetByID(ctx context.Context, id uuid.UUID) (*paymentlink.PaymentLink, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.byID[id]
+	if !ok {
+		return nil, paymentlink.ErrPaymentLinkNotFound
+	}
+	cp := *l
+	return &cp, nil
+}
+
+func (f *fakePaymentLinkRepo) GetBySlug(ctx context.Context, slug string) (*paymentlink.PaymentLink, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id, ok := f.bySlug[slug]
+	if !ok {
+		return nil, paymentlink.ErrPaymentLinkNotFound
+	}
+	cp := *f.byID[id]
+	return &cp, nil
+}
+
+func (f *fakePaymentLinkRepo) List(
+	ctx context.Context,
+	merchantID uuid.UUID,
+	environment string,
+	isActive *bool,
+	limit, offset int,
+) ([]*paymentlink.PaymentLink, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*paymentlink.PaymentLink, 0)
+	for _, l := range f.byID {
+		if l.MerchantID != merchantID {
+			continue
+		}
+		if environment != "" && l.Environment != environment {
+			continue
+		}
+		if isActive != nil && l.IsActive != *isActive {
+			continue
+		}
+		cp := *l
+		out = append(out, &cp)
+	}
+	if offset < len(out) {
+		out = out[offset:]
+	} else {
+		out = nil
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (f *fakePaymentLinkRepo) Count(
+	ctx context.Context,
+	merchantID uuid.UUID,
+	environment string,
+	isActive *bool,
+) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, l := range f.byID {
+		if l.MerchantID != merchantID {
+			continue
+		}
+		if environment != "" && l.Environment != environment {
+			continue
+		}
+		if isActive != nil && l.IsActive != *isActive {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+func (f *fakePaymentLinkRepo) Update(ctx context.Context, l *paymentlink.PaymentLink) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.byID[l.ID]; !ok {
+		return paymentlink.ErrPaymentLinkNotFound
+	}
+	cp := *l
+	f.byID[l.ID] = &cp
+	return nil
+}
+
+func (f *fakePaymentLinkRepo) SetActive(ctx context.Context, id uuid.UUID, isActive bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.byID[id]
+	if !ok {
+		return paymentlink.ErrPaymentLinkNotFound
+	}
+	l.IsActive = isActive
+	return nil
+}

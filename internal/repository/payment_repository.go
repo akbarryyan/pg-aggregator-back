@@ -22,7 +22,7 @@ const paymentSelectCols = `
 			id, reference, merchant_id, amount, currency, payment_method,
 			provider_name, provider_reference, status, description,
 			customer_name, customer_email, qris_data, callback_url,
-			environment, expires_at, paid_at, created_at, updated_at
+			environment, payment_link_id, expires_at, paid_at, created_at, updated_at
 `
 
 func scanPayment(scanner interface {
@@ -32,7 +32,7 @@ func scanPayment(scanner interface {
 		&p.ID, &p.Reference, &p.MerchantID, &p.Amount, &p.Currency, &p.PaymentMethod,
 		&p.ProviderName, &p.ProviderReference, &p.Status, &p.Description,
 		&p.CustomerName, &p.CustomerEmail, &p.QRISData, &p.CallbackURL,
-		&p.Environment, &p.ExpiresAt, &p.PaidAt, &p.CreatedAt, &p.UpdatedAt,
+		&p.Environment, &p.PaymentLinkID, &p.ExpiresAt, &p.PaidAt, &p.CreatedAt, &p.UpdatedAt,
 	)
 }
 
@@ -45,9 +45,9 @@ func (r *PaymentRepository) Create(ctx context.Context, p *payment.Payment) erro
 			id, reference, merchant_id, amount, currency, payment_method,
 			provider_name, provider_reference, status, description,
 			customer_name, customer_email, qris_data, callback_url,
-			environment, expires_at, created_at, updated_at
+			environment, payment_link_id, expires_at, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
 		)
 		RETURNING id, created_at, updated_at
 	`
@@ -56,7 +56,7 @@ func (r *PaymentRepository) Create(ctx context.Context, p *payment.Payment) erro
 		p.ID, p.Reference, p.MerchantID, p.Amount, p.Currency, p.PaymentMethod,
 		p.ProviderName, p.ProviderReference, p.Status, p.Description,
 		p.CustomerName, p.CustomerEmail, p.QRISData, p.CallbackURL,
-		p.Environment, p.ExpiresAt, p.CreatedAt, p.UpdatedAt,
+		p.Environment, p.PaymentLinkID, p.ExpiresAt, p.CreatedAt, p.UpdatedAt,
 	).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 
 	if err != nil {
@@ -177,4 +177,41 @@ func (r *PaymentRepository) ListByMerchant(ctx context.Context, merchantID uuid.
 		payments = append(payments, p)
 	}
 	return payments, nil
+}
+
+// ListByPaymentLinkID returns payments spawned by checking out through a
+// given Payment Link, most recent first — used by the link's detail page.
+func (r *PaymentRepository) ListByPaymentLinkID(ctx context.Context, linkID uuid.UUID, limit, offset int) ([]*payment.Payment, error) {
+	query := `SELECT ` + paymentSelectCols + `
+		FROM payments
+		WHERE payment_link_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := r.db.QueryContext(ctx, query, linkID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list payments by payment link: %w", err)
+	}
+	defer rows.Close()
+
+	var payments []*payment.Payment
+	for rows.Next() {
+		p := &payment.Payment{}
+		if err := scanPayment(rows, p); err != nil {
+			return nil, fmt.Errorf("failed to scan payment: %w", err)
+		}
+		payments = append(payments, p)
+	}
+	return payments, nil
+}
+
+// CountByPaymentLinkID returns the total number of payments spawned by a
+// given Payment Link, for pagination on the link's detail page.
+func (r *PaymentRepository) CountByPaymentLinkID(ctx context.Context, linkID uuid.UUID) (int, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM payments WHERE payment_link_id = $1`
+	if err := r.db.QueryRowContext(ctx, query, linkID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count payments by payment link: %w", err)
+	}
+	return count, nil
 }

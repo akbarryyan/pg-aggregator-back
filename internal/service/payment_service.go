@@ -83,6 +83,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 		CustomerEmail: req.CustomerEmail,
 		CallbackURL:   req.CallbackURL,
 		Environment:   env,
+		PaymentLinkID: req.PaymentLinkID,
 		ExpiresAt:     expiresAt,
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),

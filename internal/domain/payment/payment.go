@@ -28,25 +28,28 @@ const (
 )
 
 type Payment struct {
-	ID                uuid.UUID  `json:"id" db:"id"`
-	Reference         string     `json:"reference" db:"reference"`
-	MerchantID        uuid.UUID  `json:"merchant_id" db:"merchant_id"`
-	Amount            int64      `json:"amount" db:"amount"`
-	Currency          string     `json:"currency" db:"currency"`
-	PaymentMethod     string     `json:"payment_method" db:"payment_method"`
-	ProviderName      string     `json:"provider_name" db:"provider_name"`
-	ProviderReference *string    `json:"provider_reference,omitempty" db:"provider_reference"`
-	Status            string     `json:"status" db:"status"`
-	Description       string     `json:"description" db:"description"`
-	CustomerName      *string    `json:"customer_name,omitempty" db:"customer_name"`
-	CustomerEmail     *string    `json:"customer_email,omitempty" db:"customer_email"`
-	QRISData          *string    `json:"qris_data,omitempty" db:"qris_data"`
-	CallbackURL       *string    `json:"callback_url,omitempty" db:"callback_url"`
-	Environment       string     `json:"environment" db:"environment"`
-	ExpiresAt         time.Time  `json:"expires_at" db:"expires_at"`
-	PaidAt            *time.Time `json:"paid_at,omitempty" db:"paid_at"`
-	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
+	ID                uuid.UUID `json:"id" db:"id"`
+	Reference         string    `json:"reference" db:"reference"`
+	MerchantID        uuid.UUID `json:"merchant_id" db:"merchant_id"`
+	Amount            int64     `json:"amount" db:"amount"`
+	Currency          string    `json:"currency" db:"currency"`
+	PaymentMethod     string    `json:"payment_method" db:"payment_method"`
+	ProviderName      string    `json:"provider_name" db:"provider_name"`
+	ProviderReference *string   `json:"provider_reference,omitempty" db:"provider_reference"`
+	Status            string    `json:"status" db:"status"`
+	Description       string    `json:"description" db:"description"`
+	CustomerName      *string   `json:"customer_name,omitempty" db:"customer_name"`
+	CustomerEmail     *string   `json:"customer_email,omitempty" db:"customer_email"`
+	QRISData          *string   `json:"qris_data,omitempty" db:"qris_data"`
+	CallbackURL       *string   `json:"callback_url,omitempty" db:"callback_url"`
+	Environment       string    `json:"environment" db:"environment"`
+	// PaymentLinkID is set when this payment was spawned by a customer
+	// checking out through a Payment Link (see internal/domain/paymentlink).
+	PaymentLinkID *uuid.UUID `json:"payment_link_id,omitempty" db:"payment_link_id"`
+	ExpiresAt     time.Time  `json:"expires_at" db:"expires_at"`
+	PaidAt        *time.Time `json:"paid_at,omitempty" db:"paid_at"`
+	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 type CreatePaymentRequest struct {
@@ -66,6 +69,11 @@ type CreatePaymentRequest struct {
 	// Cashi's QRIS Custom — docs/cashi-qris-custom.md). Ignored by
 	// providers/environments that don't support it (sandbox included).
 	UseCustomMerchantName bool `json:"use_custom_merchant_name,omitempty"`
+	// PaymentLinkID traces this payment back to the Payment Link that
+	// spawned it. Deliberately excluded from JSON (json:"-") — only
+	// PaymentLinkService may set this programmatically; a client can never
+	// forge link attribution via the request body.
+	PaymentLinkID *uuid.UUID `json:"-"`
 }
 
 // NormalizeEnvironment maps free-form values to sandbox|production.
@@ -142,6 +150,7 @@ type PaymentResponse struct {
 	QRISData          *string    `json:"qris_data,omitempty"`
 	CheckoutURL       string     `json:"checkout_url"`
 	Environment       string     `json:"environment"`
+	PaymentLinkID     *uuid.UUID `json:"payment_link_id,omitempty"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	PaidAt            *time.Time `json:"paid_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
@@ -169,6 +178,7 @@ func ToPaymentResponse(p *Payment, baseURL string) *PaymentResponse {
 		QRISData:          p.QRISData,
 		CheckoutURL:       baseURL + "/pay/" + p.Reference,
 		Environment:       env,
+		PaymentLinkID:     p.PaymentLinkID,
 		ExpiresAt:         p.ExpiresAt,
 		PaidAt:            p.PaidAt,
 		CreatedAt:         p.CreatedAt,

@@ -6,6 +6,7 @@ import (
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/paymentlink"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
@@ -24,6 +25,8 @@ type paymentRepository interface {
 	UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) error
 	List(ctx context.Context, limit, offset int) ([]*payment.Payment, error)
 	ListExpiredPending(ctx context.Context, before time.Time, limit int) ([]*payment.Payment, error)
+	ListByPaymentLinkID(ctx context.Context, linkID uuid.UUID, limit, offset int) ([]*payment.Payment, error)
+	CountByPaymentLinkID(ctx context.Context, linkID uuid.UUID) (int, error)
 	ListAdmin(
 		ctx context.Context,
 		status string,
@@ -61,4 +64,14 @@ type merchantCallbackRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*merchant.CallbackDelivery, error)
 	UpdateResult(ctx context.Context, d *merchant.CallbackDelivery) error
 	ListDueForRetry(ctx context.Context, before time.Time, limit int) ([]merchant.CallbackDelivery, error)
+}
+
+type paymentLinkRepository interface {
+	Create(ctx context.Context, l *paymentlink.PaymentLink) error
+	GetByID(ctx context.Context, id uuid.UUID) (*paymentlink.PaymentLink, error)
+	GetBySlug(ctx context.Context, slug string) (*paymentlink.PaymentLink, error)
+	List(ctx context.Context, merchantID uuid.UUID, environment string, isActive *bool, limit, offset int) ([]*paymentlink.PaymentLink, error)
+	Count(ctx context.Context, merchantID uuid.UUID, environment string, isActive *bool) (int, error)
+	Update(ctx context.Context, l *paymentlink.PaymentLink) error
+	SetActive(ctx context.Context, id uuid.UUID, isActive bool) error
 }

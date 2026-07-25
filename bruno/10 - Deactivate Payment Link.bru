@@ -1,0 +1,40 @@
+meta {
+  name: 10 - Deactivate Payment Link
+  type: http
+  seq: 10
+}
+
+put {
+  url: {{base_url}}/api/v1/merchant/payment-links/{{payment_link_id}}/status
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "is_active": false
+  }
+}
+
+tests {
+  test("link deactivated", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.body.is_active).to.equal(false);
+  });
+}
+
+docs {
+  Deactivates the FIXED link from request 06. After this, re-running
+  request 09 (pointed at {{payment_link_slug}} instead) should return
+  410 Gone with "payment link is inactive" — the link's historical
+  payments (if any) are untouched either way, since
+  payments.payment_link_id is ON DELETE SET NULL, not cascading.
+}

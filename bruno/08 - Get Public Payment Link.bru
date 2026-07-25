@@ -1,0 +1,24 @@
+meta {
+  name: 08 - Get Public Payment Link
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{base_url}}/api/v1/public/payment-links/{{open_payment_link_slug}}
+  body: none
+  auth: none
+}
+
+tests {
+  test("public link resolved", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.body.is_available).to.equal(true);
+  });
+}
+
+docs {
+  No auth — this is what the public /l/{slug} checkout page calls to
+  render the link. Response is the safe subset only: no merchant_id, no
+  internal payment link id.
+}

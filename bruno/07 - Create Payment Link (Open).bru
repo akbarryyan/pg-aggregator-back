@@ -1,0 +1,53 @@
+meta {
+  name: 07 - Create Payment Link (Open)
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{base_url}}/api/v1/merchant/payment-links
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "title": "Donation",
+    "description": "Support the project",
+    "amount_type": "open",
+    "min_amount": 5000,
+    "max_amount": 100000,
+    "environment": "sandbox"
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.slug) {
+    bru.setVar("open_payment_link_slug", res.body.slug);
+  }
+}
+
+tests {
+  test("open payment link created", function () {
+    expect(res.getStatus()).to.equal(201);
+    expect(res.body.amount_type).to.equal("open");
+    expect(res.body.amount).to.equal(undefined);
+  });
+}
+
+docs {
+  Same as request 06, but amount_type: "open" — no amount at creation,
+  the customer enters one at checkout (bounded by min_amount/max_amount,
+  which are themselves clamped to the platform's 2,000-10,000,000 IDR
+  range — see PaymentLink.EffectiveBounds).
+
+  Saves {{open_payment_link_slug}}.
+}

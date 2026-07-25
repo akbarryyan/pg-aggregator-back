@@ -1,0 +1,53 @@
+meta {
+  name: 09 - Initiate Payment Link Checkout
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{base_url}}/api/v1/public/payment-links/{{open_payment_link_slug}}/pay
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "amount": 25000,
+    "customer_name": "Bruno Test Customer"
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.reference) {
+    bru.setVar("payment_reference", res.body.reference);
+  }
+}
+
+tests {
+  test("payment created from link", function () {
+    expect(res.getStatus()).to.equal(201);
+    expect(res.body.provider_name).to.equal("sandbox");
+    expect(res.body.payment_link_id).to.be.a("string");
+  });
+}
+
+docs {
+  THIS is the only request in the whole flow that actually creates a
+  Payment (and QRIS). Check the backend server logs now — you should see
+  "Creating SANDBOX payment (mock provider, no Cashi call)" for the first
+  time in this sequence.
+
+  Run this against the FIXED link (request 06's {{payment_link_slug}})
+  instead, with a wildly different "amount" in the body, to confirm the
+  client-supplied amount is ignored for fixed links — the response
+  "amount" will still be ~15000 (plus the sandbox unique-suffix), not
+  whatever you sent.
+
+  Saves {{payment_reference}} — check it via the existing
+  GET /public/payments/by-reference/{reference} route, or
+  GET /admin/payments/{id} after resolving the id.
+}

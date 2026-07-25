@@ -1,0 +1,43 @@
+meta {
+  name: 05 - Merchant Login
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{base_url}}/api/v1/auth/login
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "email": "{{merchant_email}}",
+    "password": "{{merchant_password}}"
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.token) {
+    bru.setVar("merchant_token", res.body.token);
+  }
+}
+
+tests {
+  test("login succeeded", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.body.token).to.be.a("string");
+  });
+}
+
+docs {
+  Run this before any Payment Link merchant-dashboard request below —
+  those routes require a merchant JWT, not the admin one from request 01.
+  Saves {{merchant_token}}.
+
+  Credentials come from the Local environment (seeds/006_merchant_user.sql).
+}

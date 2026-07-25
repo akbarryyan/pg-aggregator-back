@@ -1,0 +1,54 @@
+meta {
+  name: 06 - Create Payment Link (Fixed)
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{base_url}}/api/v1/merchant/payment-links
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "title": "Coffee",
+    "description": "One cup, on the house",
+    "amount_type": "fixed",
+    "amount": 15000,
+    "environment": "sandbox"
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.slug) {
+    bru.setVar("payment_link_slug", res.body.slug);
+    bru.setVar("payment_link_id", res.body.id);
+  }
+}
+
+tests {
+  test("payment link created", function () {
+    expect(res.getStatus()).to.equal(201);
+    expect(res.body.amount_type).to.equal("fixed");
+    expect(res.body.amount).to.equal(15000);
+  });
+}
+
+docs {
+  Creating a link is DB-only — it never calls Cashi/sandbox. Check the
+  backend server logs after running this: there should be NO
+  "Creating SANDBOX/PRODUCTION payment" line. That only appears once
+  request 09 (Initiate Payment Link Checkout) actually runs, since QRIS
+  is only valid ~10 minutes and can't be pre-generated for a reusable link.
+
+  Saves {{payment_link_slug}} and {{payment_link_id}} for the requests below.
+}

@@ -143,6 +143,20 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 
 			providerResp, err = selectedProvider.CreatePayment(ctx, providerReq)
 			if err == nil {
+				if req.UseCustomMerchantName {
+					// Confirms whether the provider actually honored the
+					// custom-merchant-name request (e.g. Cashi silently
+					// falls back to its default name if QRIS Custom isn't
+					// enabled on that account yet — see
+					// docs/cashi-qris-custom.md). This is otherwise
+					// invisible: RawResponse isn't persisted or returned
+					// to the API caller.
+					logger.Infof(
+						"Provider %s custom-merchant-name request for %s: is_qris_custom=%v expected_net=%v",
+						selectedProvider.GetName(), reference,
+						providerResp.RawResponse["is_qris_custom"], providerResp.RawResponse["expected_net"],
+					)
+				}
 				break
 			}
 

@@ -236,6 +236,32 @@ func TestCreatePayment(t *testing.T) {
 		}
 	})
 
+	t.Run("expires_at is parsed as WIB (+07:00), not UTC", func(t *testing.T) {
+		// Cashi's expires_at has no timezone marker but represents WIB
+		// wall-clock. Parsing it as UTC (Go's time.Parse default when the
+		// layout carries no zone) would silently produce a timestamp ~7h
+		// in the future — this regression-tests the fix.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(CreateOrderResponse{
+				Success: true, OrderID: "INV-TZ", Amount: 15000,
+				QRUrl: "data:image/png;base64,xxx", ExpiresAt: "2024-01-01 10:00:00",
+			})
+		}))
+		defer server.Close()
+
+		adapter := NewCashiAdapter(server.URL, "my-api-key", testSecret)
+		resp, err := adapter.CreatePayment(context.Background(), newProviderRequest("INV-TZ", 15000))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		wantUTC := time.Date(2024, 1, 1, 3, 0, 0, 0, time.UTC) // 10:00 WIB == 03:00 UTC
+		if !resp.ExpiresAt.UTC().Equal(wantUTC) {
+			t.Errorf("expected expires_at 2024-01-01 10:00:00 WIB to equal %v UTC, got %v UTC", wantUTC, resp.ExpiresAt.UTC())
+		}
+	})
+
 	t.Run("QRIS Custom sends QRIS_CUSTOM and captures expected_net/is_qris_custom", func(t *testing.T) {
 		var gotBody CreateOrderRequest
 

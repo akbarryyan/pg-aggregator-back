@@ -20,6 +20,17 @@ import (
 
 const cashiExpiresAtLayout = "2006-01-02 15:04:05"
 
+// cashiTimeLocation: Cashi's expires_at string has no timezone marker
+// (e.g. "2024-01-01 10:00:00"), but Cashi is an Indonesian provider and
+// this represents WIB wall-clock, not UTC. Parsing it with plain
+// time.Parse silently defaults to UTC and produces a timestamp ~7 hours
+// in the future — the same class of bug as the payments.expires_at
+// TIMESTAMPTZ migration, but at the point we read Cashi's own response
+// instead of our own DB. A fixed +07:00 offset (not time.LoadLocation)
+// avoids depending on the IANA tzdata being installed on the deployment
+// host; WIB has no DST so a fixed offset is always correct.
+var cashiTimeLocation = time.FixedZone("WIB", 7*60*60)
+
 type CashiAdapter struct {
 	baseURL    string
 	apiKey     string
@@ -62,7 +73,7 @@ func (a *CashiAdapter) CreatePayment(ctx context.Context, req *provider.Provider
 
 	orderID := cashiResp.GetOrderID()
 
-	expiresAt, err := time.Parse(cashiExpiresAtLayout, cashiResp.ExpiresAt)
+	expiresAt, err := time.ParseInLocation(cashiExpiresAtLayout, cashiResp.ExpiresAt, cashiTimeLocation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse expires_at from cashi: %w", err)
 	}

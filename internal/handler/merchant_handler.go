@@ -95,7 +95,8 @@ func (h *MerchantHandler) ListCallbacks(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	limit, offset := parseLimitOffset(r, 20, 0)
-	result, err := h.adminService.ListCallbacks(r.Context(), "", &merchantID, limit, offset)
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	result, err := h.adminService.ListCallbacks(r.Context(), status, &merchantID, limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to list callbacks")
 		return

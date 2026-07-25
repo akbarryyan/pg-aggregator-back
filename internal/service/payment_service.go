@@ -101,14 +101,15 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 		}
 		logger.Infof("Creating SANDBOX payment (mock provider, no Cashi call): %s", reference)
 		providerReq := &provider.ProviderPaymentRequest{
-			InternalReference: reference,
-			Amount:            req.Amount,
-			Currency:          req.Currency,
-			Description:       req.Description,
-			CustomerName:      req.CustomerName,
-			CustomerEmail:     req.CustomerEmail,
-			ExpiresAt:         expiresAt,
-			CallbackURL:       s.buildCallbackURL(s.sandboxProvider.GetName()),
+			InternalReference:     reference,
+			Amount:                req.Amount,
+			Currency:              req.Currency,
+			Description:           req.Description,
+			CustomerName:          req.CustomerName,
+			CustomerEmail:         req.CustomerEmail,
+			ExpiresAt:             expiresAt,
+			CallbackURL:           s.buildCallbackURL(s.sandboxProvider.GetName()),
+			UseCustomMerchantName: req.UseCustomMerchantName,
 		}
 		providerResp, err = s.sandboxProvider.CreatePayment(ctx, providerReq)
 		if err != nil {
@@ -127,14 +128,15 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 				continue
 			}
 			providerReq := &provider.ProviderPaymentRequest{
-				InternalReference: reference,
-				Amount:            req.Amount,
-				Currency:          req.Currency,
-				Description:       req.Description,
-				CustomerName:      req.CustomerName,
-				CustomerEmail:     req.CustomerEmail,
-				ExpiresAt:         expiresAt,
-				CallbackURL:       s.buildCallbackURL(selectedProvider.GetName()),
+				InternalReference:     reference,
+				Amount:                req.Amount,
+				Currency:              req.Currency,
+				Description:           req.Description,
+				CustomerName:          req.CustomerName,
+				CustomerEmail:         req.CustomerEmail,
+				ExpiresAt:             expiresAt,
+				CallbackURL:           s.buildCallbackURL(selectedProvider.GetName()),
+				UseCustomMerchantName: req.UseCustomMerchantName,
 			}
 
 			logger.Infof("Creating PRODUCTION payment with provider: %s", selectedProvider.GetName())

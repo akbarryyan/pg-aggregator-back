@@ -61,6 +61,11 @@ type CreatePaymentRequest struct {
 	ExpiresInMinutes int       `json:"expires_in_minutes,omitempty"`
 	// Environment: sandbox | production. Forced from API key when present.
 	Environment string `json:"environment,omitempty"`
+	// UseCustomMerchantName requests a custom merchant display name on the
+	// QR/payment page, where the selected provider supports it (e.g.
+	// Cashi's QRIS Custom — docs/cashi-qris-custom.md). Ignored by
+	// providers/environments that don't support it (sandbox included).
+	UseCustomMerchantName bool `json:"use_custom_merchant_name,omitempty"`
 }
 
 // NormalizeEnvironment maps free-form values to sandbox|production.

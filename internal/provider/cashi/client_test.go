@@ -235,6 +235,96 @@ func TestCreatePayment(t *testing.T) {
 			t.Fatalf("expected error on HTTP 401")
 		}
 	})
+
+	t.Run("QRIS Custom sends QRIS_CUSTOM and captures expected_net/is_qris_custom", func(t *testing.T) {
+		var gotBody CreateOrderRequest
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(CreateOrderResponse{
+				Success:      true,
+				OrderID:      "INV-CUSTOM-001",
+				Amount:       50042,
+				QRUrl:        "data:image/png;base64,xxx",
+				ExpiresAt:    "2024-01-01 10:00:00",
+				ExpectedNet:  49692,
+				IsQRISCustom: true,
+			})
+		}))
+		defer server.Close()
+
+		adapter := NewCashiAdapter(server.URL, "my-api-key", testSecret)
+		req := newProviderRequest("INV-CUSTOM-001", 50000)
+		req.UseCustomMerchantName = true
+
+		resp, err := adapter.CreatePayment(context.Background(), req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !gotBody.QRISCustom {
+			t.Errorf("expected QRIS_CUSTOM: true to be sent in the request body")
+		}
+		if resp.RawResponse["is_qris_custom"] != true {
+			t.Errorf("expected is_qris_custom captured in RawResponse, got %v", resp.RawResponse["is_qris_custom"])
+		}
+		if resp.RawResponse["expected_net"] != int64(49692) {
+			t.Errorf("expected expected_net captured in RawResponse, got %v", resp.RawResponse["expected_net"])
+		}
+	})
+
+	t.Run("regular request does not send QRIS_CUSTOM", func(t *testing.T) {
+		var gotBody CreateOrderRequest
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(CreateOrderResponse{
+				Success: true, OrderID: "INV-2", Amount: 15000,
+				QRUrl: "data:image/png;base64,xxx", ExpiresAt: "2024-01-01 10:00:00",
+			})
+		}))
+		defer server.Close()
+
+		adapter := NewCashiAdapter(server.URL, "my-api-key", testSecret)
+		req := newProviderRequest("INV-2", 15000) // UseCustomMerchantName left false
+
+		if _, err := adapter.CreatePayment(context.Background(), req); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if gotBody.QRISCustom {
+			t.Errorf("expected QRIS_CUSTOM to be omitted/false by default")
+		}
+	})
+
+	t.Run("falls back to camelCase orderId when order_id is empty", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Cashi's own QRIS Custom example response uses "orderId" instead
+			// of "order_id" — see docs/cashi-qris-custom.md.
+			_, _ = w.Write([]byte(`{
+				"success": true,
+				"orderId": "GRAB-1734567890123-456",
+				"amount": 50042,
+				"qrUrl": "data:image/png;base64,xxx",
+				"expires_at": "2024-01-01 10:00:00"
+			}`))
+		}))
+		defer server.Close()
+
+		adapter := NewCashiAdapter(server.URL, "my-api-key", testSecret)
+		req := newProviderRequest("INV-3", 50000)
+		req.UseCustomMerchantName = true
+
+		resp, err := adapter.CreatePayment(context.Background(), req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.ProviderReference != "GRAB-1734567890123-456" {
+			t.Errorf("expected fallback to camelCase orderId, got %q", resp.ProviderReference)
+		}
+	})
 }
 
 func TestGetPaymentStatus(t *testing.T) {

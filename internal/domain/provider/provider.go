@@ -28,6 +28,12 @@ type ProviderPaymentRequest struct {
 	CustomerEmail     *string
 	ExpiresAt         time.Time
 	CallbackURL       string
+	// UseCustomMerchantName requests that the provider display the
+	// merchant's custom name on the payment QR/page instead of its
+	// default account name, where supported (e.g. Cashi's QRIS Custom —
+	// see docs/cashi-qris-custom.md). Providers that don't support this
+	// silently ignore it.
+	UseCustomMerchantName bool
 }
 
 type ProviderPaymentResponse struct {

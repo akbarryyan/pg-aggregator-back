@@ -46,8 +46,9 @@ func (a *CashiAdapter) GetName() string {
 
 func (a *CashiAdapter) CreatePayment(ctx context.Context, req *provider.ProviderPaymentRequest) (*provider.ProviderPaymentResponse, error) {
 	cashiReq := &CreateOrderRequest{
-		Amount:  req.Amount,
-		OrderID: req.InternalReference,
+		Amount:     req.Amount,
+		OrderID:    req.InternalReference,
+		QRISCustom: req.UseCustomMerchantName,
 	}
 
 	var cashiResp CreateOrderResponse
@@ -59,24 +60,30 @@ func (a *CashiAdapter) CreatePayment(ctx context.Context, req *provider.Provider
 		return nil, &CashiError{StatusCode: 400, Message: cashiResp.Message}
 	}
 
+	orderID := cashiResp.GetOrderID()
+
 	expiresAt, err := time.Parse(cashiExpiresAtLayout, cashiResp.ExpiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse expires_at from cashi: %w", err)
 	}
 
 	rawResponse := map[string]interface{}{
-		"order_id":     cashiResp.OrderID,
+		"order_id":     orderID,
 		"amount":       cashiResp.Amount,
 		"checkout_url": cashiResp.CheckoutURL,
 		"qrUrl":        cashiResp.QRUrl,
 		"expires_at":   cashiResp.ExpiresAt,
+	}
+	if req.UseCustomMerchantName {
+		rawResponse["is_qris_custom"] = cashiResp.IsQRISCustom
+		rawResponse["expected_net"] = cashiResp.ExpectedNet
 	}
 
 	checkoutURL := cashiResp.CheckoutURL
 	qrURL := cashiResp.QRUrl
 
 	return &provider.ProviderPaymentResponse{
-		ProviderReference: cashiResp.OrderID,
+		ProviderReference: orderID,
 		ProviderName:      provider.ProviderCashi,
 		Status:            "pending",
 		Amount:            cashiResp.Amount,

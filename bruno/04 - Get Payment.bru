@@ -1,0 +1,27 @@
+meta {
+  name: 04 - Get Payment
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{base_url}}/api/v1/admin/payments/{{payment_id}}
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+tests {
+  test("payment fetched", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Fetches whichever payment id was last saved by request 02 or 03
+  ({{payment_id}}). Check qris_data / provider_reference here to confirm
+  what actually got persisted.
+}

@@ -1,0 +1,59 @@
+meta {
+  name: 02 - Create Payment (Production, QRIS Custom)
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{base_url}}/api/v1/admin/payments
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "merchant_id": "{{merchant_id}}",
+    "amount": 50000,
+    "description": "Bruno test - QRIS Custom to real Cashi",
+    "payment_method": "qris",
+    "environment": "production",
+    "use_custom_merchant_name": true
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.id) {
+    bru.setVar("payment_id", res.body.id);
+  }
+}
+
+tests {
+  test("payment created", function () {
+    expect(res.getStatus()).to.equal(201);
+    expect(res.body.provider_name).to.equal("cashi");
+  });
+}
+
+docs {
+  This is the ONE that actually hits Cashi (environment: production).
+  Requires real CASHI_API_KEY/CASHI_SECRET_KEY in backend/.env — sandbox
+  never calls Cashi regardless of this request.
+
+  After running, check the backend server logs for:
+    "Creating PRODUCTION payment with provider: cashi"
+    "Provider cashi custom-merchant-name request for ...: is_qris_custom=... expected_net=..."
+
+  is_qris_custom=false means Cashi accepted the request but QRIS Custom
+  isn't enabled on that Cashi account yet (not a bug here) — see
+  docs/cashi-qris-custom.md.
+
+  Saves the created payment's id into {{payment_id}} for the next request.
+}

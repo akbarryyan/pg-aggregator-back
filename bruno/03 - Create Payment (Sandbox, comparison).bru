@@ -1,0 +1,46 @@
+meta {
+  name: 03 - Create Payment (Sandbox, comparison)
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{base_url}}/api/v1/admin/payments
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "merchant_id": "{{merchant_id}}",
+    "amount": 50000,
+    "description": "Bruno test - sandbox (never touches Cashi)",
+    "payment_method": "qris",
+    "environment": "sandbox",
+    "use_custom_merchant_name": true
+  }
+}
+
+tests {
+  test("payment created via sandbox mock", function () {
+    expect(res.getStatus()).to.equal(201);
+    expect(res.body.provider_name).to.equal("sandbox");
+  });
+}
+
+docs {
+  Same body as request 02, only "environment" changed to sandbox.
+
+  Run this to see the contrast: provider_name comes back "sandbox", and
+  the backend log shows "Creating SANDBOX payment (mock provider, no
+  Cashi call)" instead — proving use_custom_merchant_name is silently a
+  no-op here, since sandbox never reaches Cashi at all.
+}

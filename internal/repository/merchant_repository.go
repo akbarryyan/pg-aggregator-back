@@ -48,6 +48,14 @@ func (r *MerchantRepository) Create(ctx context.Context, req *merchant.CreateMer
 	return m, nil
 }
 
+func (r *MerchantRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM merchants WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete merchant: %w", err)
+	}
+	return nil
+}
+
 func (r *MerchantRepository) GetByID(ctx context.Context, id uuid.UUID) (*merchant.Merchant, error) {
 	m := &merchant.Merchant{}
 

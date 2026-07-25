@@ -19,6 +19,26 @@ func NewMerchantUserRepository(db *sql.DB) *MerchantUserRepository {
 	return &MerchantUserRepository{db: db}
 }
 
+func (r *MerchantUserRepository) Create(ctx context.Context, u *merchant.User) (*merchant.User, error) {
+	u.ID = uuid.New()
+	now := time.Now().UTC()
+	u.CreatedAt = now
+	u.UpdatedAt = now
+
+	query := `
+		INSERT INTO merchant_users (id, merchant_id, name, email, password_hash, role, is_active, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id, created_at, updated_at
+	`
+	err := r.db.QueryRowContext(ctx, query,
+		u.ID, u.MerchantID, u.Name, u.Email, u.PasswordHash, u.Role, u.IsActive, u.CreatedAt, u.UpdatedAt,
+	).Scan(&u.ID, &u.CreatedAt, &u.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create merchant user: %w", err)
+	}
+	return u, nil
+}
+
 func (r *MerchantUserRepository) GetByEmail(ctx context.Context, email string) (*merchant.User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	row := r.db.QueryRowContext(ctx, `

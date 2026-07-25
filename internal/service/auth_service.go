@@ -9,6 +9,7 @@ import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/admin"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
+	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -352,6 +353,11 @@ func (s *AuthService) RegisterMerchant(ctx context.Context, req *merchant.Regist
 		return nil, err
 	}
 
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash password: %w", err)
+	}
+
 	createdMerchant, err := s.merchantRepo.Create(ctx, &merchant.CreateMerchantRequest{
 		Name:         name,
 		Email:        email,
@@ -360,12 +366,6 @@ func (s *AuthService) RegisterMerchant(ctx context.Context, req *merchant.Regist
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create merchant: %w", err)
-	}
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		_ = s.merchantRepo.Delete(ctx, createdMerchant.ID)
-		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
 	_, err = s.merchantUserRepo.Create(ctx, &merchant.User{
@@ -377,7 +377,9 @@ func (s *AuthService) RegisterMerchant(ctx context.Context, req *merchant.Regist
 		IsActive:     true,
 	})
 	if err != nil {
-		_ = s.merchantRepo.Delete(ctx, createdMerchant.ID)
+		if delErr := s.merchantRepo.Delete(ctx, createdMerchant.ID); delErr != nil {
+			logger.Errorf("failed to roll back merchant %s after registration failure: %v", createdMerchant.ID, delErr)
+		}
 		return nil, fmt.Errorf("failed to create merchant owner account: %w", err)
 	}
 

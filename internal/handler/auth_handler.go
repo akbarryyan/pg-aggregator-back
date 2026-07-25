@@ -165,7 +165,12 @@ func (h *AuthHandler) RegisterMerchant(w http.ResponseWriter, r *http.Request) {
 			merchant.ErrBusinessNameRequired,
 			merchant.ErrMerchantEmailRequired,
 			merchant.ErrMerchantPasswordRequired,
-			merchant.ErrMerchantPasswordTooShort:
+			merchant.ErrMerchantPasswordTooShort,
+			merchant.ErrMerchantPasswordTooLong,
+			merchant.ErrMerchantNameTooLong,
+			merchant.ErrMerchantEmailTooLong,
+			merchant.ErrBusinessNameTooLong,
+			merchant.ErrMerchantPhoneTooLong:
 			respondError(w, http.StatusBadRequest, err.Error())
 		case merchant.ErrMerchantAlreadyExists:
 			respondError(w, http.StatusConflict, err.Error())

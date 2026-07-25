@@ -1,6 +1,9 @@
 package merchant
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCreateMerchantRequest_Validate(t *testing.T) {
 	valid := func() *CreateMerchantRequest {
@@ -179,6 +182,46 @@ func TestRegisterRequest_Validate(t *testing.T) {
 		req.Password = "short1"
 		if err := req.Validate(); err != ErrMerchantPasswordTooShort {
 			t.Fatalf("expected ErrMerchantPasswordTooShort, got %v", err)
+		}
+	})
+
+	t.Run("password must be at most 72 characters", func(t *testing.T) {
+		req := valid()
+		req.Password = strings.Repeat("a", 73)
+		if err := req.Validate(); err != ErrMerchantPasswordTooLong {
+			t.Fatalf("expected ErrMerchantPasswordTooLong, got %v", err)
+		}
+	})
+
+	t.Run("name must be at most 150 characters", func(t *testing.T) {
+		req := valid()
+		req.Name = strings.Repeat("a", 151)
+		if err := req.Validate(); err != ErrMerchantNameTooLong {
+			t.Fatalf("expected ErrMerchantNameTooLong, got %v", err)
+		}
+	})
+
+	t.Run("business name must be at most 255 characters", func(t *testing.T) {
+		req := valid()
+		req.BusinessName = strings.Repeat("a", 256)
+		if err := req.Validate(); err != ErrBusinessNameTooLong {
+			t.Fatalf("expected ErrBusinessNameTooLong, got %v", err)
+		}
+	})
+
+	t.Run("email must be at most 255 characters", func(t *testing.T) {
+		req := valid()
+		req.Email = strings.Repeat("a", 256)
+		if err := req.Validate(); err != ErrMerchantEmailTooLong {
+			t.Fatalf("expected ErrMerchantEmailTooLong, got %v", err)
+		}
+	})
+
+	t.Run("phone must be at most 50 characters", func(t *testing.T) {
+		req := valid()
+		req.Phone = strings.Repeat("1", 51)
+		if err := req.Validate(); err != ErrMerchantPhoneTooLong {
+			t.Fatalf("expected ErrMerchantPhoneTooLong, got %v", err)
 		}
 	})
 

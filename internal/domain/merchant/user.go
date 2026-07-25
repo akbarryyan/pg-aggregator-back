@@ -14,6 +14,7 @@ var (
 	ErrMerchantInvalidCredentials      = errors.New("invalid email or password")
 	ErrMerchantPasswordRequired        = errors.New("password is required")
 	ErrMerchantPasswordTooShort        = errors.New("password must be at least 8 characters")
+	ErrMerchantPasswordTooLong         = errors.New("password must be at most 72 characters")
 	ErrMerchantCurrentPasswordRequired = errors.New("current password is required")
 	ErrMerchantNewPasswordRequired     = errors.New("new password is required")
 	ErrMerchantNewPasswordTooShort     = errors.New("new password must be at least 8 characters")
@@ -61,17 +62,32 @@ func (r *RegisterRequest) Validate() error {
 	if strings.TrimSpace(r.Name) == "" {
 		return ErrMerchantNameRequired
 	}
+	if len(r.Name) > 150 {
+		return ErrMerchantNameTooLong
+	}
 	if strings.TrimSpace(r.BusinessName) == "" {
 		return ErrBusinessNameRequired
 	}
+	if len(r.BusinessName) > 255 {
+		return ErrBusinessNameTooLong
+	}
 	if strings.TrimSpace(r.Email) == "" {
 		return ErrMerchantEmailRequired
+	}
+	if len(r.Email) > 255 {
+		return ErrMerchantEmailTooLong
+	}
+	if r.Phone != "" && len(r.Phone) > 50 {
+		return ErrMerchantPhoneTooLong
 	}
 	if r.Password == "" {
 		return ErrMerchantPasswordRequired
 	}
 	if len(r.Password) < 8 {
 		return ErrMerchantPasswordTooShort
+	}
+	if len(r.Password) > 72 {
+		return ErrMerchantPasswordTooLong
 	}
 	return nil
 }

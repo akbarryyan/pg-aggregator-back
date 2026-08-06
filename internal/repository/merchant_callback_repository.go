@@ -240,13 +240,13 @@ type scannable interface {
 
 func scanCallbackDelivery(row scannable) (*merchant.CallbackDelivery, error) {
 	var (
-		d           merchant.CallbackDelivery
-		payloadRaw  []byte
-		httpStatus  sql.NullInt64
+		d            merchant.CallbackDelivery
+		payloadRaw   []byte
+		httpStatus   sql.NullInt64
 		responseBody sql.NullString
-		errorMsg    sql.NullString
-		deliveredAt sql.NullTime
-		nextRetry   sql.NullTime
+		errorMsg     sql.NullString
+		deliveredAt  sql.NullTime
+		nextRetry    sql.NullTime
 	)
 	err := row.Scan(
 		&d.ID, &d.PaymentID, &d.MerchantID, &d.EventType, &d.TargetURL, &payloadRaw,

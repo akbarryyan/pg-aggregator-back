@@ -90,7 +90,7 @@ func (h *AdminHandler) WithReportingServices(
 func (h *AdminHandler) GetDashboardSummary(w http.ResponseWriter, r *http.Request) {
 	summary, err := h.adminDashboardService.GetDashboardSummary(r.Context())
 	if err != nil {
-		logger.Errorf("Failed to get admin dashboard summary: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get admin dashboard summary: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load dashboard summary")
 		return
 	}
@@ -107,7 +107,7 @@ func (h *AdminHandler) GetDashboardCharts(w http.ResponseWriter, r *http.Request
 
 	charts, err := h.adminDashboardService.GetDashboardCharts(r.Context(), days)
 	if err != nil {
-		logger.Errorf("Failed to get admin dashboard charts: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get admin dashboard charts: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load dashboard charts")
 		return
 	}
@@ -136,7 +136,7 @@ func (h *AdminHandler) ListPayments(w http.ResponseWriter, r *http.Request) {
 	environment := strings.TrimSpace(r.URL.Query().Get("environment"))
 	result, err := h.adminPaymentService.ListPayments(r.Context(), status, search, merchantID, dateFrom, dateTo, environment, limit, offset)
 	if err != nil {
-		logger.Errorf("Failed to list admin payments: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list admin payments: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list payments")
 		return
 	}
@@ -146,7 +146,7 @@ func (h *AdminHandler) ListPayments(w http.ResponseWriter, r *http.Request) {
 func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	var req payment.CreatePaymentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Errorf("Failed to decode create payment request: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to decode create payment request: %v", err)
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -163,7 +163,7 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 			payment.ErrInvalidExpiration:
 			respondError(w, http.StatusBadRequest, err.Error())
 		default:
-			logger.Errorf("Failed to create payment from admin: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to create payment from admin: %v", err)
 			respondError(w, http.StatusInternalServerError, err.Error())
 		}
 		return
@@ -193,7 +193,7 @@ func (h *AdminHandler) ExportPayments(w http.ResponseWriter, r *http.Request) {
 	environment := strings.TrimSpace(r.URL.Query().Get("environment"))
 	rows, err := h.adminPaymentService.ExportPayments(r.Context(), status, search, merchantID, dateFrom, dateTo, environment)
 	if err != nil {
-		logger.Errorf("Failed to export payments: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to export payments: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to export payments")
 		return
 	}
@@ -264,7 +264,7 @@ func (h *AdminHandler) ExportPayments(w http.ResponseWriter, r *http.Request) {
 
 	writer.Flush()
 	if err := writer.Error(); err != nil {
-		logger.Errorf("Failed to write payment CSV: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to write payment CSV: %v", err)
 	}
 }
 
@@ -281,7 +281,7 @@ func (h *AdminHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Payment not found")
 			return
 		}
-		logger.Errorf("Failed to get admin payment: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get admin payment: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to get payment")
 		return
 	}
@@ -294,7 +294,7 @@ func (h *AdminHandler) ListMerchants(w http.ResponseWriter, r *http.Request) {
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	result, err := h.adminMerchantService.ListMerchants(r.Context(), search, status, limit, offset)
 	if err != nil {
-		logger.Errorf("Failed to list admin merchants: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list admin merchants: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list merchants")
 		return
 	}
@@ -304,7 +304,7 @@ func (h *AdminHandler) ListMerchants(w http.ResponseWriter, r *http.Request) {
 func (h *AdminHandler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
 	var req merchant.CreateMerchantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Errorf("Failed to decode create merchant request: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to decode create merchant request: %v", err)
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -319,7 +319,7 @@ func (h *AdminHandler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
 		case merchant.ErrMerchantAlreadyExists:
 			respondError(w, http.StatusConflict, "Merchant with this email already exists")
 		default:
-			logger.Errorf("Failed to create merchant: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to create merchant: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to create merchant")
 		}
 		return
@@ -334,7 +334,7 @@ func (h *AdminHandler) ExportMerchants(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.adminMerchantService.ExportMerchants(r.Context(), search, status)
 	if err != nil {
-		logger.Errorf("Failed to export merchants: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to export merchants: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to export merchants")
 		return
 	}
@@ -376,7 +376,7 @@ func (h *AdminHandler) ExportMerchants(w http.ResponseWriter, r *http.Request) {
 
 	writer.Flush()
 	if err := writer.Error(); err != nil {
-		logger.Errorf("Failed to write merchant CSV: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to write merchant CSV: %v", err)
 	}
 }
 
@@ -393,7 +393,7 @@ func (h *AdminHandler) GetMerchant(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Merchant not found")
 			return
 		}
-		logger.Errorf("Failed to get admin merchant: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get admin merchant: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to get merchant")
 		return
 	}
@@ -421,7 +421,7 @@ func (h *AdminHandler) UpdateMerchant(w http.ResponseWriter, r *http.Request) {
 		case merchant.ErrMerchantNameRequired, merchant.ErrBusinessNameRequired:
 			respondError(w, http.StatusBadRequest, err.Error())
 		default:
-			logger.Errorf("Failed to update merchant: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to update merchant: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to update merchant")
 		}
 		return
@@ -450,7 +450,7 @@ func (h *AdminHandler) SetMerchantActive(w http.ResponseWriter, r *http.Request)
 			respondError(w, http.StatusNotFound, "Merchant not found")
 			return
 		}
-		logger.Errorf("Failed to set merchant active: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to set merchant active: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to update merchant status")
 		return
 	}
@@ -471,7 +471,7 @@ func (h *AdminHandler) GetProvider(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Provider not found")
 			return
 		}
-		logger.Errorf("Failed to get provider detail: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get provider detail: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to get provider")
 		return
 	}
@@ -496,7 +496,7 @@ func (h *AdminHandler) UpdateProviderHealth(w http.ResponseWriter, r *http.Reque
 			respondError(w, http.StatusBadRequest, "Invalid health status (use healthy, degraded, or unhealthy)")
 			return
 		}
-		logger.Errorf("Failed to update provider health: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to update provider health: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to update provider health")
 		return
 	}
@@ -515,7 +515,7 @@ func (h *AdminHandler) ListMerchantProviderConfigs(w http.ResponseWriter, r *htt
 			respondError(w, http.StatusNotFound, "Merchant not found")
 			return
 		}
-		logger.Errorf("Failed to list merchant provider configs: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list merchant provider configs: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list provider configs")
 		return
 	}
@@ -544,7 +544,7 @@ func (h *AdminHandler) UpsertMerchantProviderConfig(w http.ResponseWriter, r *ht
 			domainProvider.ErrProviderConfigPaymentMethodRequired:
 			respondError(w, http.StatusBadRequest, err.Error())
 		default:
-			logger.Errorf("Failed to upsert merchant provider config: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to upsert merchant provider config: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to save provider config")
 		}
 		return
@@ -566,7 +566,7 @@ func (h *AdminHandler) DeleteMerchantProviderConfig(w http.ResponseWriter, r *ht
 	}
 
 	if err := h.adminMerchantService.DeleteMerchantProviderConfig(r.Context(), id, paymentMethod, providerName); err != nil {
-		logger.Errorf("Failed to delete merchant provider config: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to delete merchant provider config: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to delete provider config")
 		return
 	}
@@ -577,7 +577,7 @@ func (h *AdminHandler) ListRouting(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parseLimitOffset(r, 50, 0)
 	result, err := h.adminProviderService.ListRouting(r.Context(), limit, offset)
 	if err != nil {
-		logger.Errorf("Failed to list routing: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list routing: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list routing")
 		return
 	}
@@ -593,7 +593,7 @@ func (h *AdminHandler) ListReconciliation(w http.ResponseWriter, r *http.Request
 	}
 	result, err := h.adminProviderService.ListReconciliationCandidates(r.Context(), limit)
 	if err != nil {
-		logger.Errorf("Failed to list reconciliation candidates: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list reconciliation candidates: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list reconciliation candidates")
 		return
 	}
@@ -616,7 +616,7 @@ func (h *AdminHandler) CheckReconciliationPayment(w http.ResponseWriter, r *http
 			respondError(w, http.StatusNotFound, "Payment not found")
 			return
 		}
-		logger.Errorf("Failed to reconcile payment: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to reconcile payment: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to reconcile payment")
 		return
 	}
@@ -636,7 +636,7 @@ func (h *AdminHandler) CheckReconciliationBatch(w http.ResponseWriter, r *http.R
 	}
 	results, err := h.paymentService.ReconcilePendingPayments(r.Context(), limit)
 	if err != nil {
-		logger.Errorf("Failed to batch reconcile: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to batch reconcile: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to run batch reconciliation")
 		return
 	}
@@ -680,7 +680,7 @@ func (h *AdminHandler) ListNotifications(w http.ResponseWriter, r *http.Request)
 
 	result, err := h.adminNotificationService.ListNotifications(r.Context(), limit)
 	if err != nil {
-		logger.Errorf("Failed to list admin notifications: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list admin notifications: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load notifications")
 		return
 	}
@@ -700,7 +700,7 @@ func (h *AdminHandler) ListPaymentEvents(w http.ResponseWriter, r *http.Request)
 			respondError(w, http.StatusNotFound, "Payment not found")
 			return
 		}
-		logger.Errorf("Failed to list payment events: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list payment events: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list payment events")
 		return
 	}
@@ -720,7 +720,7 @@ func (h *AdminHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Log event not found")
 			return
 		}
-		logger.Errorf("Failed to get log: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get log: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to get log")
 		return
 	}
@@ -743,7 +743,7 @@ func (h *AdminHandler) ListMerchantAPIKeys(w http.ResponseWriter, r *http.Reques
 			respondError(w, http.StatusNotFound, "Merchant not found")
 			return
 		}
-		logger.Errorf("Failed to list API keys: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list API keys: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list API keys")
 		return
 	}
@@ -791,7 +791,7 @@ func (h *AdminHandler) UpsertMerchantAPIKey(w http.ResponseWriter, r *http.Reque
 		case merchant.ErrAPIKeyPasswordRequired:
 			respondError(w, http.StatusBadRequest, "Admin password is required")
 		default:
-			logger.Errorf("Failed to update API key: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to update API key: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to update API key")
 		}
 		return
@@ -847,7 +847,7 @@ func (h *AdminHandler) DeleteMerchantAPIKey(w http.ResponseWriter, r *http.Reque
 		case merchant.ErrAPIKeyNotFound:
 			respondError(w, http.StatusNotFound, "API key not found")
 		default:
-			logger.Errorf("Failed to delete API key: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to delete API key: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to delete API key")
 		}
 		return
@@ -865,7 +865,7 @@ func (h *AdminHandler) ListMerchantPayments(w http.ResponseWriter, r *http.Reque
 	limit, offset := parseLimitOffset(r, 20, 0)
 	result, err := h.adminMerchantService.ListMerchantPayments(r.Context(), id, limit, offset)
 	if err != nil {
-		logger.Errorf("Failed to list merchant payments: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list merchant payments: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list merchant payments")
 		return
 	}
@@ -879,7 +879,7 @@ func (h *AdminHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 	processed := strings.TrimSpace(r.URL.Query().Get("processed"))
 	result, err := h.adminLogService.ListLogs(r.Context(), status, providerName, processed, limit, offset)
 	if err != nil {
-		logger.Errorf("Failed to list admin logs: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list admin logs: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list logs")
 		return
 	}
@@ -901,7 +901,7 @@ func (h *AdminHandler) ListCallbacks(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.adminCallbackService.ListCallbacks(r.Context(), status, merchantID, limit, offset)
 	if err != nil {
-		logger.Errorf("Failed to list callbacks: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list callbacks: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list callbacks")
 		return
 	}
@@ -916,7 +916,7 @@ func (h *AdminHandler) ListPaymentCallbacks(w http.ResponseWriter, r *http.Reque
 	}
 	items, err := h.adminCallbackService.ListPaymentCallbacks(r.Context(), id)
 	if err != nil {
-		logger.Errorf("Failed to list payment callbacks: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list payment callbacks: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list payment callbacks")
 		return
 	}
@@ -939,7 +939,7 @@ func (h *AdminHandler) RetryCallback(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Callback delivery not found")
 			return
 		}
-		logger.Errorf("Failed to retry callback: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to retry callback: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to retry callback")
 		return
 	}
@@ -953,7 +953,7 @@ func (h *AdminHandler) ExportLogs(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.adminLogService.ExportLogs(r.Context(), status, providerName, processed)
 	if err != nil {
-		logger.Errorf("Failed to export logs: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to export logs: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to export logs")
 		return
 	}

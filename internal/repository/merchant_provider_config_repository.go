@@ -156,8 +156,8 @@ func (r *MerchantProviderConfigRepository) Delete(ctx context.Context, merchantI
 
 // RoutingRow joins merchant display name for admin routing views.
 type RoutingRow struct {
-	Config       *provider.MerchantProviderConfig
-	MerchantName string
+	Config        *provider.MerchantProviderConfig
+	MerchantName  string
 	MerchantEmail string
 }
 

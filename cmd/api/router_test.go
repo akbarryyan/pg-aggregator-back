@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/handler"
@@ -19,7 +20,6 @@ import (
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
-	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 )
 
@@ -180,9 +180,9 @@ func (f *fakeWebhookEventRepo) Finalize(
 // way it's routed to this stub here (via ProviderRouter + payment-method
 // registration), so exercising this path exercises the real routing logic.
 type stubProvider struct {
-	name              string
-	fixedProviderRef  string
-	webhookStatus     string
+	name             string
+	fixedProviderRef string
+	webhookStatus    string
 }
 
 func (p *stubProvider) GetName() string { return p.name }

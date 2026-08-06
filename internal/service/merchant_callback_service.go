@@ -87,7 +87,7 @@ func (s *PaymentService) NotifyMerchantPaymentEvent(ctx context.Context, p *paym
 	} else {
 		m, err := s.merchantRepo.GetByID(ctx, p.MerchantID)
 		if err != nil {
-			logger.Warnf("Merchant callback skipped: merchant not found for payment %s: %v", p.Reference, err)
+			logger.WarnfCtx(ctx, "Merchant callback skipped: merchant not found for payment %s: %v", p.Reference, err)
 			return
 		}
 		if m.WebhookURL != nil {
@@ -96,7 +96,7 @@ func (s *PaymentService) NotifyMerchantPaymentEvent(ctx context.Context, p *paym
 	}
 
 	if targetURL == "" {
-		logger.Infof("Merchant callback skipped for payment %s: no webhook URL", p.Reference)
+		logger.InfofCtx(ctx, "Merchant callback skipped for payment %s: no webhook URL", p.Reference)
 		return
 	}
 
@@ -132,7 +132,7 @@ func (s *PaymentService) NotifyMerchantPaymentEvent(ctx context.Context, p *paym
 	}
 
 	if err := s.callbackRepo.Create(ctx, delivery); err != nil {
-		logger.Errorf("Failed to persist merchant callback for %s: %v", p.Reference, err)
+		logger.ErrorfCtx(ctx, "Failed to persist merchant callback for %s: %v", p.Reference, err)
 		return
 	}
 
@@ -236,7 +236,7 @@ func (s *PaymentService) executeCallbackDelivery(ctx context.Context, d *merchan
 		// Signing is best-effort: a transient secret-provisioning failure
 		// shouldn't block the merchant from learning their payment status
 		// changed. The delivery just goes out unsigned this one time.
-		logger.Errorf("Failed to get webhook secret for merchant %s, sending unsigned: %v", d.MerchantID, secretErr)
+		logger.ErrorfCtx(ctx, "Failed to get webhook secret for merchant %s, sending unsigned: %v", d.MerchantID, secretErr)
 	} else {
 		req.Header.Set("X-PG-Signature", signWebhookPayload(secret, body))
 	}
@@ -248,7 +248,7 @@ func (s *PaymentService) executeCallbackDelivery(ctx context.Context, d *merchan
 		d.ErrorMessage = &msg
 		d.NextRetryAt = nextRetryAt(d.AttemptNumber)
 		_ = s.callbackRepo.UpdateResult(ctx, d)
-		logger.Warnf("Merchant callback failed for %s → %s: %v", d.PaymentID, d.TargetURL, err)
+		logger.WarnfCtx(ctx, "Merchant callback failed for %s → %s: %v", d.PaymentID, d.TargetURL, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -267,13 +267,13 @@ func (s *PaymentService) executeCallbackDelivery(ctx context.Context, d *merchan
 		d.DeliveredAt = &now
 		d.ErrorMessage = nil
 		d.NextRetryAt = nil
-		logger.Infof("Merchant callback success (%d) for payment %s", statusCode, d.PaymentID)
+		logger.InfofCtx(ctx, "Merchant callback success (%d) for payment %s", statusCode, d.PaymentID)
 	} else {
 		d.Status = merchant.CallbackStatusFailed
 		msg := fmt.Sprintf("unexpected HTTP status %d", statusCode)
 		d.ErrorMessage = &msg
 		d.NextRetryAt = nextRetryAt(d.AttemptNumber)
-		logger.Warnf("Merchant callback HTTP %d for payment %s", statusCode, d.PaymentID)
+		logger.WarnfCtx(ctx, "Merchant callback HTTP %d for payment %s", statusCode, d.PaymentID)
 	}
 	_ = s.callbackRepo.UpdateResult(ctx, d)
 }
@@ -309,7 +309,7 @@ func (s *PaymentService) RetryDueMerchantCallbacks(ctx context.Context, limit in
 	secretCache := make(map[uuid.UUID]string)
 	for i := range due {
 		if _, err := s.retryMerchantCallbackData(ctx, &due[i], secretCache); err != nil {
-			logger.Errorf("Failed to auto-retry callback %s: %v", due[i].ID, err)
+			logger.ErrorfCtx(ctx, "Failed to auto-retry callback %s: %v", due[i].ID, err)
 		}
 	}
 

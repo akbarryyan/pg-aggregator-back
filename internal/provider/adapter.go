@@ -164,10 +164,10 @@ func (r *ProviderRouter) ListProviderHealths() []domainProvider.ProviderHealth {
 // ProviderInfo is a safe admin-facing summary of a registered provider.
 // Credentials are never included.
 type ProviderInfo struct {
-	Name            string                       `json:"name"`
-	PaymentMethods  []string                     `json:"payment_methods"`
-	Health          domainProvider.ProviderHealth `json:"health"`
-	IsRegistered    bool                         `json:"is_registered"`
+	Name           string                        `json:"name"`
+	PaymentMethods []string                      `json:"payment_methods"`
+	Health         domainProvider.ProviderHealth `json:"health"`
+	IsRegistered   bool                          `json:"is_registered"`
 }
 
 func (r *ProviderRouter) ListProviders() []ProviderInfo {

@@ -25,7 +25,7 @@ func RunPeriodic(ctx context.Context, interval time.Duration, name string, task 
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Infof("scheduler: stopping %q", name)
+			logger.InfofCtx(ctx, "scheduler: stopping %q", name)
 			return
 		case <-ticker.C:
 			runOnce(ctx, name, task)
@@ -36,11 +36,11 @@ func RunPeriodic(ctx context.Context, interval time.Duration, name string, task 
 func runOnce(ctx context.Context, name string, task func(context.Context) error) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Errorf("scheduler: job %q panicked: %v", name, r)
+			logger.ErrorfCtx(ctx, "scheduler: job %q panicked: %v", name, r)
 		}
 	}()
 
 	if err := task(ctx); err != nil {
-		logger.Errorf("scheduler: job %q failed: %v", name, err)
+		logger.ErrorfCtx(ctx, "scheduler: job %q failed: %v", name, err)
 	}
 }

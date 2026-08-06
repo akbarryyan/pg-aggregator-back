@@ -100,7 +100,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 		if s.sandboxProvider == nil {
 			return nil, fmt.Errorf("sandbox provider is not configured")
 		}
-		logger.Infof("Creating SANDBOX payment (mock provider, no Cashi call): %s", reference)
+		logger.InfofCtx(ctx, "Creating SANDBOX payment (mock provider, no Cashi call): %s", reference)
 		providerReq := &provider.ProviderPaymentRequest{
 			InternalReference:     reference,
 			Amount:                req.Amount,
@@ -140,7 +140,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 				UseCustomMerchantName: req.UseCustomMerchantName,
 			}
 
-			logger.Infof("Creating PRODUCTION payment with provider: %s", selectedProvider.GetName())
+			logger.InfofCtx(ctx, "Creating PRODUCTION payment with provider: %s", selectedProvider.GetName())
 
 			providerResp, err = selectedProvider.CreatePayment(ctx, providerReq)
 			if err == nil {
@@ -152,7 +152,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 					// docs/cashi-qris-custom.md). This is otherwise
 					// invisible: RawResponse isn't persisted or returned
 					// to the API caller.
-					logger.Infof(
+					logger.InfofCtx(ctx,
 						"Provider %s custom-merchant-name request for %s: is_qris_custom=%v expected_net=%v",
 						selectedProvider.GetName(), reference,
 						providerResp.RawResponse["is_qris_custom"], providerResp.RawResponse["expected_net"],
@@ -162,7 +162,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 			}
 
 			lastErr = err
-			logger.Errorf("Provider %s error: %v", selectedProvider.GetName(), err)
+			logger.ErrorfCtx(ctx, "Provider %s error: %v", selectedProvider.GetName(), err)
 			if !candidate.failoverEnabled {
 				break
 			}
@@ -185,11 +185,11 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 	}
 
 	if err := s.paymentRepo.Create(ctx, p); err != nil {
-		logger.Errorf("Failed to save payment: %v", err)
+		logger.ErrorfCtx(ctx, "Failed to save payment: %v", err)
 		return nil, fmt.Errorf("failed to save payment: %w", err)
 	}
 
-	logger.Infof("Payment created successfully: %s (provider: %s)", p.Reference, p.ProviderName)
+	logger.InfofCtx(ctx, "Payment created successfully: %s (provider: %s)", p.Reference, p.ProviderName)
 	return p, nil
 }
 
@@ -300,11 +300,11 @@ func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Pa
 		return result, nil
 	}
 
-	logger.Infof("Reconciling payment %s with provider %s ref %s", p.Reference, p.ProviderName, *p.ProviderReference)
+	logger.InfofCtx(ctx, "Reconciling payment %s with provider %s ref %s", p.Reference, p.ProviderName, *p.ProviderReference)
 
 	providerStatus, err := selectedProvider.GetPaymentStatus(ctx, *p.ProviderReference)
 	if err != nil {
-		logger.Warnf("Failed to check provider status for %s: %v", p.Reference, err)
+		logger.WarnfCtx(ctx, "Failed to check provider status for %s: %v", p.Reference, err)
 		// Fall back: if past expiry, expire locally even if provider check failed.
 		if p.Status == payment.StatusPending && time.Now().After(p.ExpiresAt) {
 			if updErr := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusExpired, nil); updErr != nil {
@@ -446,7 +446,7 @@ func (s *PaymentService) resolveProvidersForMerchant(ctx context.Context, mercha
 	for _, merchantConfig := range merchantConfigs {
 		selectedProvider, exists := s.providerRouter.GetProvider(merchantConfig.ProviderName)
 		if !exists {
-			logger.Warnf(
+			logger.WarnfCtx(ctx,
 				"Skipping unregistered provider %s for merchant %s and payment method %s",
 				merchantConfig.ProviderName,
 				merchantConfig.MerchantID,
@@ -457,7 +457,7 @@ func (s *PaymentService) resolveProvidersForMerchant(ctx context.Context, mercha
 
 		health := s.providerRouter.GetProviderHealth(merchantConfig.ProviderName)
 		if health.Status == provider.HealthStatusUnhealthy {
-			logger.Warnf(
+			logger.WarnfCtx(ctx,
 				"Skipping unhealthy provider %s for merchant %s and payment method %s",
 				merchantConfig.ProviderName,
 				merchantConfig.MerchantID,

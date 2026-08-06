@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/google/uuid"
 )
 

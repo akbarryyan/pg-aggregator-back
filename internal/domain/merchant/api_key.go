@@ -71,9 +71,9 @@ type DeleteAPIKeyRequest struct {
 
 // UpsertAPIKeyResponse includes the secret once after create/rotate.
 type UpsertAPIKeyResponse struct {
-	Key       *APIKeyPublic `json:"key"`
-	Secret    string        `json:"secret"`
-	Hint      string        `json:"hint"`
-	Rotated   bool          `json:"rotated"` // true if previous key for env was replaced
-	Environment string      `json:"environment"`
+	Key         *APIKeyPublic `json:"key"`
+	Secret      string        `json:"secret"`
+	Hint        string        `json:"hint"`
+	Rotated     bool          `json:"rotated"` // true if previous key for env was replaced
+	Environment string        `json:"environment"`
 }

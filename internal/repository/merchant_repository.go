@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
+	"github.com/google/uuid"
 )
 
 type MerchantRepository struct {

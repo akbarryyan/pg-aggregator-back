@@ -92,7 +92,7 @@ func (h *MerchantHandler) GetDashboardCharts(w http.ResponseWriter, r *http.Requ
 
 	raw, err := h.adminDashboardService.MerchantDailyStats(r.Context(), merchantID, env, days)
 	if err != nil {
-		logger.Errorf("merchant charts: %v", err)
+		logger.ErrorfCtx(r.Context(), "merchant charts: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load charts")
 		return
 	}
@@ -108,7 +108,7 @@ func (h *MerchantHandler) ListNotifications(w http.ResponseWriter, r *http.Reque
 	env := merchantEnvFromQuery(r)
 	result, err := h.adminNotificationService.ListMerchantNotifications(r.Context(), merchantID, env, 30)
 	if err != nil {
-		logger.Errorf("merchant notifications: %v", err)
+		logger.ErrorfCtx(r.Context(), "merchant notifications: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load notifications")
 		return
 	}
@@ -144,7 +144,7 @@ func (h *MerchantHandler) GetDashboardSummary(w http.ResponseWriter, r *http.Req
 	// the 100 most recent paid payments instead of all of them.
 	stats, err := h.adminPaymentService.StatusBreakdown(r.Context(), &merchantID, env)
 	if err != nil {
-		logger.Errorf("merchant dashboard summary: %v", err)
+		logger.ErrorfCtx(r.Context(), "merchant dashboard summary: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load dashboard summary")
 		return
 	}
@@ -176,7 +176,7 @@ func (h *MerchantHandler) ListPayments(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.adminPaymentService.ListPayments(r.Context(), status, search, &merchantID, dateFrom, dateTo, env, limit, offset)
 	if err != nil {
-		logger.Errorf("merchant list payments: %v", err)
+		logger.ErrorfCtx(r.Context(), "merchant list payments: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list payments")
 		return
 	}
@@ -199,7 +199,7 @@ func (h *MerchantHandler) ExportPayments(w http.ResponseWriter, r *http.Request)
 
 	rows, err := h.adminPaymentService.ExportPayments(r.Context(), status, search, &merchantID, dateFrom, dateTo, env)
 	if err != nil {
-		logger.Errorf("merchant export payments: %v", err)
+		logger.ErrorfCtx(r.Context(), "merchant export payments: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to export payments")
 		return
 	}
@@ -302,7 +302,7 @@ func (h *MerchantHandler) CreatePayment(w http.ResponseWriter, r *http.Request) 
 	}
 	p, err := h.paymentService.CreatePayment(r.Context(), &req)
 	if err != nil {
-		logger.Errorf("merchant create payment: %v", err)
+		logger.ErrorfCtx(r.Context(), "merchant create payment: %v", err)
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -353,7 +353,7 @@ func (h *MerchantHandler) UpsertAPIKey(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		logger.Errorf("merchant upsert api key: %v", err)
+		logger.ErrorfCtx(r.Context(), "merchant upsert api key: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to update API key")
 		return
 	}
@@ -443,7 +443,7 @@ func (h *MerchantHandler) GetWebhookSecret(w http.ResponseWriter, r *http.Reques
 	}
 	secret, err := h.paymentService.EnsureMerchantWebhookSecret(r.Context(), merchantID)
 	if err != nil {
-		logger.Errorf("Failed to get webhook secret for merchant %s: %v", merchantID, err)
+		logger.ErrorfCtx(r.Context(), "Failed to get webhook secret for merchant %s: %v", merchantID, err)
 		respondError(w, http.StatusInternalServerError, "Failed to load webhook secret")
 		return
 	}
@@ -460,7 +460,7 @@ func (h *MerchantHandler) RegenerateWebhookSecret(w http.ResponseWriter, r *http
 	}
 	secret, err := h.paymentService.RegenerateMerchantWebhookSecret(r.Context(), merchantID)
 	if err != nil {
-		logger.Errorf("Failed to regenerate webhook secret for merchant %s: %v", merchantID, err)
+		logger.ErrorfCtx(r.Context(), "Failed to regenerate webhook secret for merchant %s: %v", merchantID, err)
 		respondError(w, http.StatusInternalServerError, "Failed to regenerate webhook secret")
 		return
 	}

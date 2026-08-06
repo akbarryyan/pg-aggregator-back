@@ -164,9 +164,9 @@ type apiKeyScanner interface {
 
 func scanAPIKey(row apiKeyScanner) (*merchant.APIKey, error) {
 	var (
-		k          merchant.APIKey
-		lastUsed   sql.NullTime
-		revokedAt  sql.NullTime
+		k         merchant.APIKey
+		lastUsed  sql.NullTime
+		revokedAt sql.NullTime
 	)
 	err := row.Scan(
 		&k.ID, &k.MerchantID, &k.Name, &k.KeyPrefix, &k.KeyHash, &k.IsActive,

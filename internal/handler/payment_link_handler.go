@@ -49,7 +49,7 @@ func (h *PaymentLinkHandler) ListPaymentLinks(w http.ResponseWriter, r *http.Req
 
 	result, err := h.linkService.ListLinks(r.Context(), merchantID, environment, isActive, limit, offset)
 	if err != nil {
-		logger.Errorf("Failed to list payment links: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to list payment links: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list payment links")
 		return
 	}
@@ -82,7 +82,7 @@ func (h *PaymentLinkHandler) CreatePaymentLink(w http.ResponseWriter, r *http.Re
 
 	link, err := h.linkService.CreateLink(r.Context(), &req)
 	if err != nil {
-		respondPaymentLinkValidationError(w, err)
+		respondPaymentLinkValidationError(w, r, err)
 		return
 	}
 
@@ -138,7 +138,7 @@ func (h *PaymentLinkHandler) UpdatePaymentLink(w http.ResponseWriter, r *http.Re
 			respondError(w, http.StatusNotFound, "Payment link not found")
 			return
 		}
-		respondPaymentLinkValidationError(w, err)
+		respondPaymentLinkValidationError(w, r, err)
 		return
 	}
 
@@ -253,7 +253,7 @@ func (h *PaymentLinkHandler) InitiatePaymentLinkCheckout(w http.ResponseWriter, 
 		case errors.Is(err, paymentlink.ErrCustomerAmountRequired), errors.Is(err, paymentlink.ErrCustomerAmountOutOfRange):
 			respondError(w, http.StatusBadRequest, err.Error())
 		default:
-			logger.Errorf("Failed to initiate payment link checkout: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to initiate payment link checkout: %v", err)
 			respondCreatePaymentError(w, err)
 		}
 		return
@@ -279,7 +279,7 @@ func parseIsActiveQuery(r *http.Request) *bool {
 
 // respondPaymentLinkValidationError maps paymentlink domain validation
 // errors to 400 Bad Request; anything else is treated as an internal error.
-func respondPaymentLinkValidationError(w http.ResponseWriter, err error) {
+func respondPaymentLinkValidationError(w http.ResponseWriter, r *http.Request, err error) {
 	switch err {
 	case paymentlink.ErrTitleRequired,
 		paymentlink.ErrInvalidAmountType,
@@ -291,7 +291,7 @@ func respondPaymentLinkValidationError(w http.ResponseWriter, err error) {
 		payment.ErrUnsupportedCurrency:
 		respondError(w, http.StatusBadRequest, err.Error())
 	default:
-		logger.Errorf("Payment link operation failed: %v", err)
+		logger.ErrorfCtx(r.Context(), "Payment link operation failed: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to save payment link")
 	}
 }

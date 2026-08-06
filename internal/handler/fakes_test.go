@@ -180,7 +180,7 @@ type fakeProvider struct {
 	createResp *domainProvider.ProviderPaymentResponse
 	createErr  error
 
-	validateErr error
+	validateErr  error
 	parsePayload *domainProvider.ProviderWebhookPayload
 	parseErr     error
 }

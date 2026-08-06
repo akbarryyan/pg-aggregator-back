@@ -7,10 +7,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
-	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 )
 

@@ -390,7 +390,7 @@ func (s *AuthService) RegisterMerchant(ctx context.Context, req *merchant.Regist
 	})
 	if err != nil {
 		if delErr := s.merchantRepo.Delete(ctx, createdMerchant.ID); delErr != nil {
-			logger.Errorf("failed to roll back merchant %s after registration failure: %v", createdMerchant.ID, delErr)
+			logger.ErrorfCtx(ctx, "failed to roll back merchant %s after registration failure: %v", createdMerchant.ID, delErr)
 		}
 		return nil, fmt.Errorf("failed to create merchant owner account: %w", err)
 	}

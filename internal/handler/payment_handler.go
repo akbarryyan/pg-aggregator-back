@@ -31,7 +31,7 @@ func NewPaymentHandler(paymentService *service.PaymentService, frontendURL strin
 func (h *PaymentHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	var req payment.CreatePaymentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Errorf("Failed to decode request: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to decode request: %v", err)
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -51,7 +51,7 @@ func (h *PaymentHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 
 	p, err := h.paymentService.CreatePayment(r.Context(), &req)
 	if err != nil {
-		logger.Errorf("Failed to create payment: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to create payment: %v", err)
 		respondCreatePaymentError(w, err)
 		return
 	}
@@ -76,7 +76,7 @@ func (h *PaymentHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Payment not found")
 			return
 		}
-		logger.Errorf("Failed to get payment: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get payment: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to get payment")
 		return
 	}
@@ -163,7 +163,7 @@ func (h *PaymentHandler) GetPaymentStatus(w http.ResponseWriter, r *http.Request
 			respondError(w, http.StatusNotFound, "Payment not found")
 			return
 		}
-		logger.Errorf("Failed to get payment status: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get payment status: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to get payment status")
 		return
 	}

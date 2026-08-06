@@ -30,7 +30,7 @@ func (h *WebhookHandler) HandleProviderWebhook(w http.ResponseWriter, r *http.Re
 
 	rawPayload, err := io.ReadAll(r.Body)
 	if err != nil {
-		logger.Errorf("Failed to read webhook payload: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to read webhook payload: %v", err)
 		respondError(w, http.StatusBadRequest, "Failed to read request body")
 		return
 	}
@@ -38,10 +38,10 @@ func (h *WebhookHandler) HandleProviderWebhook(w http.ResponseWriter, r *http.Re
 
 	signature := r.Header.Get("x-gateway-signature")
 
-	logger.Infof("Received webhook from provider %s, signature present: %v", providerName, signature != "")
+	logger.InfofCtx(r.Context(), "Received webhook from provider %s, signature present: %v", providerName, signature != "")
 
 	if err := h.paymentService.ProcessWebhook(r.Context(), providerName, rawPayload, signature); err != nil {
-		logger.Errorf("Failed to process webhook: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to process webhook: %v", err)
 		if errors.Is(err, payment.ErrDuplicateWebhook) || errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
 			respondJSON(w, http.StatusOK, map[string]string{
 				"status":  "ignored",
@@ -54,7 +54,7 @@ func (h *WebhookHandler) HandleProviderWebhook(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	logger.Info("Webhook processed successfully")
+	logger.InfoCtx(r.Context(), "Webhook processed successfully")
 	respondJSON(w, http.StatusOK, map[string]string{
 		"status":  "success",
 		"message": "Webhook processed successfully",

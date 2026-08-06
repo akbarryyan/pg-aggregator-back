@@ -248,7 +248,14 @@ func (s *PaymentService) ReconcilePayment(ctx context.Context, id uuid.UUID) (*R
 	if err != nil {
 		return nil, err
 	}
+	return s.reconcilePaymentData(ctx, p)
+}
 
+// reconcilePaymentData is ReconcilePayment's body operating on an
+// already-fetched payment, so batch callers that already have the row (e.g.
+// ReconcilePendingPayments, which lists via ListAdmin) don't re-fetch it by
+// ID — that was a redundant SELECT per payment for every batch reconcile.
+func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Payment) (*ReconcileResult, error) {
 	result := &ReconcileResult{
 		PaymentID:      p.ID,
 		Reference:      p.Reference,
@@ -376,7 +383,9 @@ func (s *PaymentService) ReconcilePendingPayments(ctx context.Context, limit int
 	}
 	results := make([]*ReconcileResult, 0, len(rows))
 	for _, row := range rows {
-		r, err := s.ReconcilePayment(ctx, row.Payment.ID)
+		// row.Payment is already fetched via ListAdmin — reconcile it
+		// directly instead of re-fetching by ID (see reconcilePaymentData).
+		r, err := s.reconcilePaymentData(ctx, row.Payment)
 		if err != nil {
 			msg := err.Error()
 			results = append(results, &ReconcileResult{

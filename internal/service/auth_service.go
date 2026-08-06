@@ -8,7 +8,6 @@ import (
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/admin"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
-	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -59,14 +58,27 @@ type authMerchantUserRepository interface {
 	Create(ctx context.Context, u *merchant.User) (*merchant.User, error)
 }
 
+// authAdminRepository captures exactly the repository methods AuthService
+// depends on for admin auth — same fake-ability pattern as
+// authMerchantRepository/authMerchantUserRepository above.
+// *repository.AdminRepository already satisfies this implicitly.
+type authAdminRepository interface {
+	GetByEmail(ctx context.Context, email string) (*admin.Admin, error)
+	GetByID(ctx context.Context, id uuid.UUID) (*admin.Admin, error)
+	UpdateLastLoginAt(ctx context.Context, id uuid.UUID, at time.Time) error
+	UpdatePasswordHash(ctx context.Context, id uuid.UUID, passwordHash string) error
+	ExistsByEmailExceptID(ctx context.Context, email string, id uuid.UUID) (bool, error)
+	UpdateProfile(ctx context.Context, id uuid.UUID, name, email string) (*admin.Admin, error)
+}
+
 type AuthService struct {
-	adminRepo        *repository.AdminRepository
+	adminRepo        authAdminRepository
 	merchantUserRepo authMerchantUserRepository
 	merchantRepo     authMerchantRepository
 	jwtSecret        []byte
 }
 
-func NewAuthService(adminRepo *repository.AdminRepository, jwtSecret string) *AuthService {
+func NewAuthService(adminRepo authAdminRepository, jwtSecret string) *AuthService {
 	return &AuthService{
 		adminRepo: adminRepo,
 		jwtSecret: []byte(jwtSecret),

@@ -136,7 +136,7 @@ func (s *PaymentService) NotifyMerchantPaymentEvent(ctx context.Context, p *paym
 		return
 	}
 
-	s.executeCallbackDelivery(ctx, delivery)
+	s.executeCallbackDelivery(ctx, delivery, nil)
 }
 
 func (s *PaymentService) RetryMerchantCallback(ctx context.Context, id uuid.UUID) (*merchant.CallbackDelivery, error) {
@@ -147,7 +147,21 @@ func (s *PaymentService) RetryMerchantCallback(ctx context.Context, id uuid.UUID
 	if err != nil {
 		return nil, err
 	}
+	return s.retryMerchantCallbackData(ctx, existing, nil)
+}
 
+// retryMerchantCallbackData is RetryMerchantCallback's body operating on an
+// already-fetched delivery, so RetryDueMerchantCallbacks (which already has
+// every due row from ListDueForRetry) doesn't re-fetch each one by ID — a
+// redundant SELECT per callback in the batch. secretCache lets a batch
+// caller reuse one merchant's webhook secret across multiple due callbacks
+// instead of re-querying merchants per delivery; pass nil for a single ad
+// hoc retry (no reuse to be had).
+func (s *PaymentService) retryMerchantCallbackData(
+	ctx context.Context,
+	existing *merchant.CallbackDelivery,
+	secretCache map[uuid.UUID]string,
+) (*merchant.CallbackDelivery, error) {
 	// Create a new attempt row (keeps history) based on previous delivery.
 	retry := &merchant.CallbackDelivery{
 		ID:             uuid.New(),
@@ -164,7 +178,7 @@ func (s *PaymentService) RetryMerchantCallback(ctx context.Context, id uuid.UUID
 	if err := s.callbackRepo.Create(ctx, retry); err != nil {
 		return nil, err
 	}
-	s.executeCallbackDelivery(ctx, retry)
+	s.executeCallbackDelivery(ctx, retry, secretCache)
 
 	// A new attempt now exists for this failure — clear the source
 	// delivery's retry schedule so RetryDueMerchantCallbacks doesn't pick
@@ -175,7 +189,27 @@ func (s *PaymentService) RetryMerchantCallback(ctx context.Context, id uuid.UUID
 	return retry, nil
 }
 
-func (s *PaymentService) executeCallbackDelivery(ctx context.Context, d *merchant.CallbackDelivery) {
+// resolveWebhookSecret is EnsureMerchantWebhookSecret with an optional
+// per-batch cache so retrying several due callbacks for the same merchant
+// doesn't hit merchantRepo.GetByID once per delivery. Pass a nil cache to
+// skip caching (single-item callers).
+func (s *PaymentService) resolveWebhookSecret(ctx context.Context, merchantID uuid.UUID, secretCache map[uuid.UUID]string) (string, error) {
+	if secretCache != nil {
+		if secret, ok := secretCache[merchantID]; ok {
+			return secret, nil
+		}
+	}
+	secret, err := s.EnsureMerchantWebhookSecret(ctx, merchantID)
+	if err != nil {
+		return "", err
+	}
+	if secretCache != nil {
+		secretCache[merchantID] = secret
+	}
+	return secret, nil
+}
+
+func (s *PaymentService) executeCallbackDelivery(ctx context.Context, d *merchant.CallbackDelivery, secretCache map[uuid.UUID]string) {
 	body, err := json.Marshal(d.RequestPayload)
 	if err != nil {
 		msg := err.Error()
@@ -198,7 +232,7 @@ func (s *PaymentService) executeCallbackDelivery(ctx context.Context, d *merchan
 	req.Header.Set("User-Agent", "pg-aggregator-callback/1.0")
 	req.Header.Set("X-PG-Event", d.EventType)
 
-	if secret, secretErr := s.EnsureMerchantWebhookSecret(ctx, d.MerchantID); secretErr != nil {
+	if secret, secretErr := s.resolveWebhookSecret(ctx, d.MerchantID, secretCache); secretErr != nil {
 		// Signing is best-effort: a transient secret-provisioning failure
 		// shouldn't block the merchant from learning their payment status
 		// changed. The delivery just goes out unsigned this one time.
@@ -268,9 +302,14 @@ func (s *PaymentService) RetryDueMerchantCallbacks(ctx context.Context, limit in
 		return 0, fmt.Errorf("failed to list due callback retries: %w", err)
 	}
 
-	for _, d := range due {
-		if _, err := s.RetryMerchantCallback(ctx, d.ID); err != nil {
-			logger.Errorf("Failed to auto-retry callback %s: %v", d.ID, err)
+	// due rows are already fetched — reuse them (retryMerchantCallbackData)
+	// instead of re-fetching each by ID, and share one webhook-secret cache
+	// across the batch in case several due callbacks belong to the same
+	// merchant.
+	secretCache := make(map[uuid.UUID]string)
+	for i := range due {
+		if _, err := s.retryMerchantCallbackData(ctx, &due[i], secretCache); err != nil {
+			logger.Errorf("Failed to auto-retry callback %s: %v", due[i].ID, err)
 		}
 	}
 

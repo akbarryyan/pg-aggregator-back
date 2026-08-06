@@ -1,0 +1,1537 @@
+openapi: 3.0.3
+info:
+  title: WhuzPay Payment Gateway Aggregator API
+  description: |
+    REST API for the WhuzPay QRIS payment gateway aggregator. Orchestrates
+    payment providers (Cashi in production, an in-process mock for
+    merchant sandbox) behind one consistent API and dashboard.
+
+    Generated from the actual route table in `cmd/api/main.go` and the
+    handler/service/domain source — not hand-guessed. See
+    [docs/payment-state-machine.md](payment-state-machine.md) for the
+    payment status lifecycle these endpoints read and write.
+  version: "1.0"
+  license:
+    name: Proprietary
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development
+
+tags:
+  - name: Auth (Merchant)
+    description: Merchant dashboard login/session (JWT)
+  - name: Auth (Admin)
+    description: Admin panel login/session (JWT)
+  - name: Admin - Dashboard
+  - name: Admin - Payments
+  - name: Admin - Merchants
+  - name: Admin - Providers
+  - name: Admin - Routing
+  - name: Admin - Reconciliation
+  - name: Admin - Notifications
+  - name: Admin - Callbacks
+  - name: Admin - Logs
+  - name: Merchant Dashboard
+  - name: Merchant Payment Links
+  - name: Public
+    description: No authentication — customer-facing checkout
+  - name: Merchant API
+    description: Server-to-server integration, authenticated via API key
+  - name: Webhooks
+  - name: Health
+
+security: []
+
+paths:
+  # ---------------------------------------------------------------- Auth (Merchant)
+  /auth/login:
+    post:
+      tags: [Auth (Merchant)]
+      summary: Merchant dashboard login
+      description: Rate limited 5 req/min per IP (classic brute-force target).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserLoginRequest' }
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserLoginResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { description: Invalid email or password, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Merchant/user inactive, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/register:
+    post:
+      tags: [Auth (Merchant)]
+      summary: Register a new merchant
+      description: Rate limited 5 req/min per IP.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Merchant created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisteredMerchant' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { description: Email already registered, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/me:
+    get:
+      tags: [Auth (Merchant)]
+      summary: Get current merchant user profile
+      security: [{ merchantBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/UserResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/profile:
+    put:
+      tags: [Auth (Merchant)]
+      summary: Update merchant user profile (name/email)
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { name: { type: string }, email: { type: string } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/UserResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/change-password:
+    post:
+      tags: [Auth (Merchant)]
+      summary: Change merchant user password
+      description: |
+        Rate limited 10 req/min per IP (project backlog #8) — previously
+        unlimited once past JWT auth.
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 8 }
+      responses:
+        '200': { description: Password changed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { description: Missing/invalid token, or current password incorrect }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- Auth (Admin)
+  /auth/admin/login:
+    post:
+      tags: [Auth (Admin)]
+      summary: Admin login
+      description: Rate limited 5 req/min per IP.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AdminLoginRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminLoginResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { description: Invalid credentials }
+        '403': { description: Admin inactive }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/admin/me:
+    get:
+      tags: [Auth (Admin)]
+      summary: Get current admin profile
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/admin/profile:
+    put:
+      tags: [Auth (Admin)]
+      summary: Update admin profile
+      security: [{ adminBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { name: { type: string }, email: { type: string } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { description: Email already in use }
+
+  /auth/admin/change-password:
+    post:
+      tags: [Auth (Admin)]
+      summary: Change admin password
+      description: Rate limited 10 req/min per IP (project backlog #8).
+      security: [{ adminBearer: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 8 }
+      responses:
+        '200': { description: Password changed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { description: Missing/invalid token, or current password incorrect }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- Admin - Dashboard
+  /admin/dashboard/summary:
+    get:
+      tags: [Admin - Dashboard]
+      summary: Global payment/merchant counters
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DashboardSummary' } } } }
+
+  /admin/dashboard/charts:
+    get:
+      tags: [Admin - Dashboard]
+      summary: Daily payment chart + status breakdown
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 14, maximum: 90 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DashboardCharts' } } } }
+
+  # ---------------------------------------------------------------- Admin - Payments
+  /admin/payments:
+    get:
+      tags: [Admin - Payments]
+      summary: List payments (admin view, all merchants)
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: merchant_id, in: query, schema: { type: string, format: uuid } }
+        - { name: environment, in: query, schema: { type: string, enum: [sandbox, production] } }
+        - { name: date_from, in: query, schema: { type: string, format: date-time } }
+        - { name: date_to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedPayments' } } } }
+    post:
+      tags: [Admin - Payments]
+      summary: Create a payment on behalf of a merchant
+      security: [{ adminBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreatePaymentRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '502': { description: Provider error }
+        '503': { description: Provider unavailable }
+
+  /admin/payments/export:
+    get:
+      tags: [Admin - Payments]
+      summary: Export payments as CSV
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: merchant_id, in: query, schema: { type: string, format: uuid } }
+        - { name: environment, in: query, schema: { type: string } }
+        - { name: date_from, in: query, schema: { type: string, format: date-time } }
+        - { name: date_to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: CSV file, content: { text/csv: { schema: { type: string, format: binary } } } }
+
+  /admin/payments/{id}:
+    get:
+      tags: [Admin - Payments]
+      summary: Get payment detail
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminPaymentDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/payments/{id}/events:
+    get:
+      tags: [Admin - Payments]
+      summary: List webhook events for a payment
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AdminLogItem' } } } } }
+
+  /admin/payments/{id}/callbacks:
+    get:
+      tags: [Admin - Payments]
+      summary: List outbound merchant-webhook callback attempts for a payment
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AdminCallbackItem' } } } } }
+
+  # ---------------------------------------------------------------- Admin - Merchants
+  /admin/merchants:
+    get:
+      tags: [Admin - Merchants]
+      summary: List merchants
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive] } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedMerchants' } } } }
+    post:
+      tags: [Admin - Merchants]
+      summary: Create a merchant
+      security: [{ adminBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateMerchantRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { description: Merchant with this email already exists }
+
+  /admin/merchants/export:
+    get:
+      tags: [Admin - Merchants]
+      summary: Export merchants as CSV
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        '200': { description: CSV file, content: { text/csv: { schema: { type: string, format: binary } } } }
+
+  /admin/merchants/{id}:
+    get:
+      tags: [Admin - Merchants]
+      summary: Get merchant
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Admin - Merchants]
+      summary: Update merchant
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdateMerchantRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/merchants/{id}/status:
+    put:
+      tags: [Admin - Merchants]
+      summary: Activate/deactivate a merchant
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { is_active: { type: boolean } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/merchants/{id}/payments:
+    get:
+      tags: [Admin - Merchants]
+      summary: List a merchant's payments
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PathID' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedPayments' } } } }
+
+  /admin/merchants/{id}/api-keys:
+    get:
+      tags: [Admin - Merchants]
+      summary: List a merchant's API keys (admin view)
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/APIKeyPublic' } } } } }
+    put:
+      tags: [Admin - Merchants]
+      summary: Create/rotate a merchant's API key (admin-initiated)
+      description: Rate limited 10 req/min per IP (project backlog #8).
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpsertAPIKeyRequest' } } }
+      responses:
+        '200': { description: OK — secret shown once, content: { application/json: { schema: { $ref: '#/components/schemas/UpsertAPIKeyResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    post:
+      tags: [Admin - Merchants]
+      summary: Create/rotate a merchant's API key (admin-initiated)
+      description: Same as PUT. Rate limited 10 req/min per IP.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpsertAPIKeyRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/UpsertAPIKeyResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/merchants/{id}/api-keys/{keyId}:
+    delete:
+      tags: [Admin - Merchants]
+      summary: Revoke a merchant's API key
+      description: Rate limited 10 req/min per IP (project backlog #8).
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PathID' }
+        - { name: keyId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Deleted }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/merchants/{id}/provider-configs:
+    get:
+      tags: [Admin - Merchants]
+      summary: List a merchant's provider routing configs
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/MerchantProviderConfig' } } } } } } }
+    post:
+      tags: [Admin - Merchants]
+      summary: Upsert a merchant's provider routing config
+      description: Returns the merchant's full refreshed config list (project backlog #6/#7 — collapsed from two round-trips into one).
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpsertMerchantProviderConfigRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/MerchantProviderConfig' } } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Admin - Merchants]
+      summary: Upsert a merchant's provider routing config
+      description: Same as POST.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpsertMerchantProviderConfigRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/MerchantProviderConfig' } } } } } } }
+    delete:
+      tags: [Admin - Merchants]
+      summary: Delete a merchant's provider routing config
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PathID' }
+        - { name: payment_method, in: query, required: true, schema: { type: string } }
+        - { name: provider_name, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Deleted }
+
+  # ---------------------------------------------------------------- Admin - Providers
+  /admin/providers:
+    get:
+      tags: [Admin - Providers]
+      summary: List registered payment providers
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/ProviderInfo' } } } } } } }
+
+  /admin/providers/{name}:
+    get:
+      tags: [Admin - Providers]
+      summary: Get provider detail + merchant routing count
+      security: [{ adminBearer: [] }]
+      parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ProviderDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/providers/{name}/health:
+    put:
+      tags: [Admin - Providers]
+      summary: Set provider health status (in-memory, affects routing)
+      description: |
+        Setting a provider `unhealthy` makes `ProviderRouter.SelectProviders`
+        skip it entirely — this endpoint can halt production payment
+        creation for that provider. Admin-only, JWT protected (see project
+        backlog security fix: this used to also be reachable
+        unauthenticated at a since-removed duplicate route).
+      security: [{ adminBearer: [] }]
+      parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdateProviderHealthRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ProviderDetail' } } } }
+        '400': { description: Invalid health status }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- Admin - Routing
+  /admin/routing:
+    get:
+      tags: [Admin - Routing]
+      summary: List all merchant → provider routing configs
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedRouting' } } } }
+
+  # ---------------------------------------------------------------- Admin - Reconciliation
+  /admin/reconciliation:
+    get:
+      tags: [Admin - Reconciliation]
+      summary: List pending payments that may need a provider status check
+      security: [{ adminBearer: [] }]
+      parameters: [{ name: limit, in: query, schema: { type: integer, default: 50 } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ReconciliationResponse' } } } }
+
+  /admin/reconciliation/check:
+    post:
+      tags: [Admin - Reconciliation]
+      summary: Batch-poll providers for pending payments and sync status
+      security: [{ adminBearer: [] }]
+      parameters: [{ name: limit, in: query, schema: { type: integer, default: 20, maximum: 50 } }]
+      responses:
+        '200':
+          description: Batch summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  updated: { type: integer }
+                  unchanged: { type: integer }
+                  expired: { type: integer }
+                  skipped: { type: integer }
+                  errored: { type: integer }
+                  results: { type: array, items: { $ref: '#/components/schemas/ReconcileResult' } }
+
+  /admin/reconciliation/{id}/check:
+    post:
+      tags: [Admin - Reconciliation]
+      summary: Poll the provider for one payment and sync status
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ReconcileResult' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- Admin - Notifications
+  /admin/notifications:
+    get:
+      tags: [Admin - Notifications]
+      summary: Operational alert feed (failed webhooks, failed/expired payments)
+      security: [{ adminBearer: [] }]
+      parameters: [{ name: limit, in: query, schema: { type: integer, default: 30, maximum: 50 } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationsResponse' } } } }
+
+  # ---------------------------------------------------------------- Admin - Callbacks
+  /admin/callbacks:
+    get:
+      tags: [Admin - Callbacks]
+      summary: List outbound merchant-webhook callback deliveries
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: status, in: query, schema: { type: string, enum: [pending, success, failed] } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedCallbacks' } } } }
+
+  /admin/callbacks/{id}/retry:
+    post:
+      tags: [Admin - Callbacks]
+      summary: Manually retry one failed callback delivery
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminCallbackItem' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- Admin - Logs
+  /admin/logs:
+    get:
+      tags: [Admin - Logs]
+      summary: List raw provider webhook events
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: provider_name, in: query, schema: { type: string } }
+        - { name: processed, in: query, schema: { type: string, enum: ['yes', 'no'] } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedLogs' } } } }
+
+  /admin/logs/export:
+    get:
+      tags: [Admin - Logs]
+      summary: Export webhook event logs as CSV
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: CSV file, content: { text/csv: { schema: { type: string, format: binary } } } }
+
+  /admin/logs/{id}:
+    get:
+      tags: [Admin - Logs]
+      summary: Get one webhook event, with secrets redacted from the raw payload
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminLogDetail' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- Merchant Dashboard
+  /merchant/dashboard/summary:
+    get:
+      tags: [Merchant Dashboard]
+      summary: Payment counters for the authenticated merchant
+      description: |
+        Single aggregate query (project backlog #6 — previously 6
+        ListPayments calls / 12 SQL round-trips, and had a latent bug
+        capping paid_amount at the 100 most recent paid payments).
+      security: [{ merchantBearer: [] }]
+      parameters: [{ name: environment, in: query, schema: { type: string, enum: [sandbox, production] } }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  environment: { type: string }
+                  total_payments: { type: integer }
+                  paid_payments: { type: integer }
+                  pending_payments: { type: integer }
+                  failed_payments: { type: integer }
+                  expired_payments: { type: integer }
+                  paid_amount: { type: integer }
+
+  /merchant/dashboard/charts:
+    get:
+      tags: [Merchant Dashboard]
+      summary: Daily payment chart for the authenticated merchant
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - { name: environment, in: query, schema: { type: string } }
+        - { name: days, in: query, schema: { type: integer, default: 14, maximum: 90 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DashboardCharts' } } } }
+
+  /merchant/notifications:
+    get:
+      tags: [Merchant Dashboard]
+      summary: Operational alert feed scoped to this merchant
+      security: [{ merchantBearer: [] }]
+      parameters: [{ name: environment, in: query, schema: { type: string } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationsResponse' } } } }
+
+  /merchant/callbacks:
+    get:
+      tags: [Merchant Dashboard]
+      summary: List this merchant's outbound webhook callback deliveries
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedCallbacks' } } } }
+
+  /merchant/payments:
+    get:
+      tags: [Merchant Dashboard]
+      summary: List this merchant's payments
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: environment, in: query, schema: { type: string } }
+        - { name: date_from, in: query, schema: { type: string, format: date-time } }
+        - { name: date_to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedPayments' } } } }
+    post:
+      tags: [Merchant Dashboard]
+      summary: Create a payment from the dashboard
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreatePaymentRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /merchant/payments/export:
+    get:
+      tags: [Merchant Dashboard]
+      summary: Export this merchant's payments as CSV
+      security: [{ merchantBearer: [] }]
+      responses:
+        '200': { description: CSV file, content: { text/csv: { schema: { type: string, format: binary } } } }
+
+  /merchant/payments/{id}:
+    get:
+      tags: [Merchant Dashboard]
+      summary: Get one of this merchant's payments
+      security: [{ merchantBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
+        '404': { description: Not found (also returned if the payment belongs to another merchant) }
+
+  /merchant/api-keys:
+    get:
+      tags: [Merchant Dashboard]
+      summary: List this merchant's API keys
+      security: [{ merchantBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/APIKeyPublic' } } } } }
+    put:
+      tags: [Merchant Dashboard]
+      summary: Create/rotate an API key for sandbox or production
+      description: |
+        Requires admin-password confirmation in the request body even
+        though the caller is already merchant-JWT-authenticated. Rate
+        limited 10 req/min per IP (project backlog #8) — previously
+        unlimited once past JWT auth.
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpsertAPIKeyRequest' } } }
+      responses:
+        '200': { description: OK — secret shown once, content: { application/json: { schema: { $ref: '#/components/schemas/UpsertAPIKeyResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    post:
+      tags: [Merchant Dashboard]
+      summary: Create/rotate an API key
+      description: Same as PUT. Rate limited 10 req/min per IP.
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpsertAPIKeyRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/UpsertAPIKeyResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /merchant/api-keys/{keyId}:
+    delete:
+      tags: [Merchant Dashboard]
+      summary: Revoke an API key
+      description: Rate limited 10 req/min per IP (project backlog #8).
+      security: [{ merchantBearer: [] }]
+      parameters: [{ name: keyId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Deleted }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /merchant/business:
+    get:
+      tags: [Merchant Dashboard]
+      summary: Get business profile (merchant record)
+      security: [{ merchantBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+    put:
+      tags: [Merchant Dashboard]
+      summary: Update business profile
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdateMerchantRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+
+  /merchant/webhook-secret:
+    get:
+      tags: [Merchant Dashboard]
+      summary: Get (or lazily generate) the outbound webhook HMAC signing secret
+      security: [{ merchantBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { secret: { type: string } } } } } }
+
+  /merchant/webhook-secret/regenerate:
+    post:
+      tags: [Merchant Dashboard]
+      summary: Rotate the webhook signing secret
+      description: |
+        Invalidates the previous secret immediately. Rate limited 10
+        req/min per IP (project backlog #8) — previously unlimited once
+        past JWT auth.
+      security: [{ merchantBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { secret: { type: string } } } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- Merchant Payment Links
+  /merchant/payment-links:
+    get:
+      tags: [Merchant Payment Links]
+      summary: List this merchant's payment links
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/PaymentLinkResponse' } }
+                  total: { type: integer }
+    post:
+      tags: [Merchant Payment Links]
+      summary: Create a payment link
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreatePaymentLinkRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentLinkResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /merchant/payment-links/{id}:
+    get:
+      tags: [Merchant Payment Links]
+      summary: Get a payment link
+      security: [{ merchantBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentLinkResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Merchant Payment Links]
+      summary: Update a payment link
+      description: amount_type/amount are immutable after creation — deactivate and create a new link instead.
+      security: [{ merchantBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdatePaymentLinkRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentLinkResponse' } } } }
+
+  /merchant/payment-links/{id}/status:
+    put:
+      tags: [Merchant Payment Links]
+      summary: Activate/deactivate a payment link
+      security: [{ merchantBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { is_active: { type: boolean } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentLinkResponse' } } } }
+
+  /merchant/payment-links/{id}/payments:
+    get:
+      tags: [Merchant Payment Links]
+      summary: List payments spawned by this link
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PathID' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedPayments' } } } }
+
+  # ---------------------------------------------------------------- Public
+  /public/payments/by-reference/{reference}:
+    get:
+      tags: [Public]
+      summary: Get a payment by reference (checkout page polling)
+      description: No auth. Rate limited 120 req/min per IP. Returns only checkout-safe fields.
+      parameters: [{ name: reference, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/payment-links/{slug}:
+    get:
+      tags: [Public]
+      summary: Resolve a public payment link
+      description: No auth. Rate limited 120 req/min per IP.
+      parameters: [{ name: slug, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PublicPaymentLinkResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/payment-links/{slug}/pay:
+    post:
+      tags: [Public]
+      summary: Check out through a payment link
+      description: |
+        No auth. Rate limited 120 req/min per IP. Spawns a fresh one-time
+        Payment linked back to this Payment Link (see
+        PaymentLinkService). `amount` is only honored for open-amount
+        links — for fixed links it is ignored server-side.
+      parameters: [{ name: slug, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/InitiateCheckoutRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- Merchant API (API key)
+  /payments:
+    post:
+      tags: [Merchant API]
+      summary: Create a payment (server-to-server)
+      description: |
+        `merchant_id` and `environment` in the request body are ignored —
+        forced from the authenticated API key
+        (see MerchantAPIAuthMiddleware) so a caller can never forge
+        another merchant's ID.
+      security: [{ apiKey: [] }]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreatePaymentRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { description: Missing/invalid/revoked API key }
+        '403': { description: Merchant inactive }
+        '502': { description: Provider error }
+        '503': { description: Provider unavailable }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /payments/{id}:
+    get:
+      tags: [Merchant API]
+      summary: Get a payment (server-to-server)
+      security: [{ apiKey: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /payments/{id}/status:
+    get:
+      tags: [Merchant API]
+      summary: Get a payment's status (lightweight polling endpoint)
+      security: [{ apiKey: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentStatusResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- Webhooks
+  /provider-webhooks/{providerName}:
+    post:
+      tags: [Webhooks]
+      summary: Inbound webhook from a payment provider (e.g. Cashi)
+      description: |
+        No auth — signature-verified downstream per provider adapter
+        (`x-gateway-signature` header, HMAC). Rate limited 120 req/min per
+        IP to blunt flooding. Duplicate or already-terminal-payment
+        webhooks respond 200 `{"status":"ignored"}` rather than an error,
+        since providers retry on non-2xx (see
+        docs/payment-state-machine.md).
+      parameters: [{ name: providerName, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '200': { description: Processed or ignored (duplicate/terminal) }
+        '400': { description: Invalid payload / signature validation failed / unregistered provider }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- Health
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      responses:
+        '200': { description: OK }
+
+components:
+  securitySchemes:
+    adminBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Admin session token from POST /auth/admin/login.
+    merchantBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Merchant dashboard session token from POST /auth/login.
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Merchant API key. Accepted either as `X-API-Key: <key>` or
+        `Authorization: Bearer <key>` (see MerchantAPIAuthMiddleware).
+
+  parameters:
+    PathID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 20 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, default: 0 }
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Unauthorized:
+      description: Missing or invalid authorization
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    NotFound:
+      description: Not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    TooManyRequests:
+      description: Rate limit exceeded (per-IP)
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+
+    # ---- Auth ----
+    UserLoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    UserLoginResponse:
+      type: object
+      properties:
+        token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Seconds until expiry }
+        user: { $ref: '#/components/schemas/UserResponse' }
+    UserResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string }
+        role: { type: string }
+        is_active: { type: boolean }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        business_name: { type: string }
+        webhook_url: { type: string, nullable: true }
+    RegisterRequest:
+      type: object
+      required: [name, business_name, email, password]
+      properties:
+        name: { type: string, maxLength: 150 }
+        business_name: { type: string, maxLength: 255 }
+        email: { type: string, format: email, maxLength: 255 }
+        phone: { type: string, maxLength: 50 }
+        password: { type: string, minLength: 8, maxLength: 72 }
+    RegisteredMerchant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        business_name: { type: string }
+        webhook_url: { type: string, nullable: true }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    AdminLoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    AdminLoginResponse:
+      type: object
+      properties:
+        token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer }
+        admin: { $ref: '#/components/schemas/AdminResponse' }
+    AdminResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string }
+        is_active: { type: boolean }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    # ---- Payment ----
+    CreatePaymentRequest:
+      type: object
+      required: [amount, payment_method, description]
+      properties:
+        merchant_id: { type: string, format: uuid, description: Forced from context on merchant-authenticated routes }
+        amount: { type: integer, minimum: 1 }
+        currency: { type: string, default: IDR }
+        payment_method: { type: string, enum: [qris] }
+        description: { type: string }
+        customer_name: { type: string, nullable: true }
+        customer_email: { type: string, nullable: true }
+        callback_url: { type: string, nullable: true }
+        expires_in_minutes: { type: integer, minimum: 1, maximum: 1440, default: 30 }
+        environment: { type: string, enum: [sandbox, production] }
+        use_custom_merchant_name:
+          type: boolean
+          description: Requests a custom merchant display name on the QR (provider-dependent, e.g. Cashi QRIS Custom).
+    PaymentResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        reference: { type: string }
+        merchant_id: { type: string, format: uuid }
+        amount: { type: integer }
+        currency: { type: string }
+        payment_method: { type: string }
+        provider_name: { type: string }
+        provider_reference: { type: string, nullable: true }
+        status: { type: string, enum: [pending, paid, expired, failed, cancelled] }
+        description: { type: string }
+        customer_name: { type: string, nullable: true }
+        customer_email: { type: string, nullable: true }
+        qris_data: { type: string, nullable: true }
+        checkout_url: { type: string }
+        environment: { type: string }
+        payment_link_id: { type: string, format: uuid, nullable: true }
+        expires_at: { type: string, format: date-time }
+        paid_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PaymentStatusResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        reference: { type: string }
+        status: { type: string }
+        amount: { type: integer }
+        currency: { type: string }
+        paid_at: { type: string, format: date-time, nullable: true }
+        expires_at: { type: string, format: date-time }
+
+    AdminPaymentItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        reference: { type: string }
+        merchant_id: { type: string, format: uuid }
+        merchant_name: { type: string }
+        amount: { type: integer }
+        currency: { type: string }
+        payment_method: { type: string }
+        provider_name: { type: string }
+        provider_reference: { type: string, nullable: true }
+        status: { type: string }
+        description: { type: string }
+        customer_name: { type: string, nullable: true }
+        customer_email: { type: string, nullable: true }
+        environment: { type: string }
+        expires_at: { type: string, format: date-time }
+        paid_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AdminPaymentDetail:
+      allOf:
+        - $ref: '#/components/schemas/AdminPaymentItem'
+        - type: object
+          properties:
+            qris_data: { type: string, nullable: true }
+            callback_url: { type: string, nullable: true }
+    PaginatedPayments:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AdminPaymentItem' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    ReconcileResult:
+      type: object
+      properties:
+        payment_id: { type: string, format: uuid }
+        reference: { type: string }
+        previous_status: { type: string }
+        current_status: { type: string }
+        provider_status: { type: string, nullable: true }
+        action: { type: string, enum: [updated, unchanged, expired_local, skipped, error] }
+        message: { type: string }
+        merchant_notified: { type: boolean }
+
+    # ---- Merchant ----
+    CreateMerchantRequest:
+      type: object
+      required: [name, email, business_name]
+      properties:
+        name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        business_name: { type: string }
+        webhook_url: { type: string, nullable: true }
+    UpdateMerchantRequest:
+      type: object
+      properties:
+        name: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        business_name: { type: string, nullable: true }
+        webhook_url: { type: string, nullable: true }
+    MerchantResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        business_name: { type: string }
+        webhook_url: { type: string, nullable: true }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PaginatedMerchants:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/MerchantResponse' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    # ---- API Keys ----
+    APIKeyPublic:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        name: { type: string, description: 'Environment alias: sandbox | production' }
+        key_prefix: { type: string }
+        is_active: { type: boolean }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UpsertAPIKeyRequest:
+      type: object
+      required: [environment, password]
+      properties:
+        environment: { type: string, enum: [sandbox, production] }
+        password: { type: string, description: Admin/account password confirmation required for this destructive action }
+    UpsertAPIKeyResponse:
+      type: object
+      properties:
+        key: { $ref: '#/components/schemas/APIKeyPublic' }
+        secret: { type: string, description: Shown once — not retrievable again }
+        hint: { type: string }
+        rotated: { type: boolean }
+        environment: { type: string }
+
+    # ---- Provider / Routing ----
+    ProviderInfo:
+      type: object
+      properties:
+        name: { type: string }
+        payment_methods: { type: array, items: { type: string } }
+        health: { $ref: '#/components/schemas/ProviderHealth' }
+        is_registered: { type: boolean }
+    ProviderHealth:
+      type: object
+      properties:
+        provider_name: { type: string }
+        status: { type: string, enum: [healthy, degraded, unhealthy] }
+        reason: { type: string }
+        updated_at: { type: string, format: date-time }
+    ProviderDetail:
+      type: object
+      properties:
+        provider: { $ref: '#/components/schemas/ProviderInfo' }
+        merchant_count: { type: integer }
+        merchant_routes: { type: array, items: { $ref: '#/components/schemas/RoutingItem' } }
+    UpdateProviderHealthRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [healthy, degraded, unhealthy] }
+        reason: { type: string }
+    MerchantProviderConfig:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        provider_name: { type: string }
+        payment_method: { type: string }
+        priority: { type: integer }
+        weight: { type: integer }
+        failover_enabled: { type: boolean }
+        is_enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UpsertMerchantProviderConfigRequest:
+      type: object
+      required: [provider_name, payment_method]
+      properties:
+        provider_name: { type: string }
+        payment_method: { type: string }
+        priority: { type: integer, default: 1 }
+        weight: { type: integer, default: 100 }
+        failover_enabled: { type: boolean }
+        is_enabled: { type: boolean }
+    RoutingItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        merchant_name: { type: string }
+        merchant_email: { type: string }
+        provider_name: { type: string }
+        payment_method: { type: string }
+        priority: { type: integer }
+        weight: { type: integer }
+        failover_enabled: { type: boolean }
+        is_enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PaginatedRouting:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/RoutingItem' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    # ---- Reconciliation ----
+    ReconciliationItem:
+      type: object
+      properties:
+        payment_id: { type: string, format: uuid }
+        reference: { type: string }
+        merchant_name: { type: string }
+        provider_name: { type: string }
+        provider_reference: { type: string, nullable: true }
+        status: { type: string }
+        amount: { type: integer }
+        currency: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        check_status: { type: string, enum: [pending_review, possibly_expired, missing_provider_ref] }
+        note: { type: string }
+    ReconciliationResponse:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ReconciliationItem' } }
+        total: { type: integer }
+        message: { type: string }
+
+    # ---- Dashboard ----
+    DashboardSummary:
+      type: object
+      properties:
+        total_payments: { type: integer }
+        pending_payments: { type: integer }
+        paid_payments: { type: integer }
+        expired_payments: { type: integer }
+        failed_payments: { type: integer }
+        total_merchants: { type: integer }
+        paid_amount: { type: integer }
+        webhook_events: { type: integer }
+    DashboardDailyPoint:
+      type: object
+      properties:
+        date: { type: string, format: date }
+        label: { type: string }
+        total: { type: integer }
+        paid: { type: integer }
+        pending: { type: integer }
+        failed: { type: integer }
+        expired: { type: integer }
+        cancelled: { type: integer }
+        paid_amount: { type: integer }
+    DashboardStatusPoint:
+      type: object
+      properties:
+        status: { type: string }
+        count: { type: integer }
+    DashboardCharts:
+      type: object
+      properties:
+        days: { type: integer }
+        daily: { type: array, items: { $ref: '#/components/schemas/DashboardDailyPoint' } }
+        status_breakdown: { type: array, items: { $ref: '#/components/schemas/DashboardStatusPoint' } }
+
+    # ---- Notifications ----
+    AdminNotification:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [webhook_error, webhook_pending, payment_failed, payment_expired, info] }
+        title: { type: string }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+        href: { type: string }
+        attention: { type: boolean, description: Counts toward the notification badge }
+    NotificationsResponse:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AdminNotification' } }
+        attention_count: { type: integer }
+        total: { type: integer }
+
+    # ---- Logs ----
+    AdminLogItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        payment_id: { type: string, format: uuid, nullable: true }
+        provider_name: { type: string }
+        provider_reference: { type: string }
+        event_type: { type: string }
+        status: { type: string }
+        is_processed: { type: boolean }
+        processing_error: { type: string, nullable: true }
+        processed_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    AdminLogDetail:
+      allOf:
+        - $ref: '#/components/schemas/AdminLogItem'
+        - type: object
+          properties:
+            raw_payload:
+              type: object
+              description: Secret-looking keys (secret/password/api_key/authorization/signature/token) are redacted.
+    PaginatedLogs:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AdminLogItem' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    # ---- Callbacks ----
+    AdminCallbackItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        payment_id: { type: string, format: uuid }
+        payment_reference: { type: string }
+        merchant_id: { type: string, format: uuid }
+        merchant_name: { type: string }
+        event_type: { type: string }
+        target_url: { type: string }
+        request_payload: { type: object }
+        attempt_number: { type: integer }
+        status: { type: string, enum: [pending, success, failed] }
+        http_status: { type: integer, nullable: true }
+        response_body: { type: string, nullable: true }
+        error_message: { type: string, nullable: true }
+        delivered_at: { type: string, format: date-time, nullable: true }
+        next_retry_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PaginatedCallbacks:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AdminCallbackItem' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    # ---- Payment Links ----
+    CreatePaymentLinkRequest:
+      type: object
+      required: [merchant_id, title, amount_type]
+      properties:
+        merchant_id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        amount_type: { type: string, enum: [fixed, open] }
+        amount: { type: integer, nullable: true, description: Required for fixed, forbidden for open }
+        currency: { type: string, default: IDR }
+        min_amount: { type: integer, nullable: true }
+        max_amount: { type: integer, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        environment: { type: string, enum: [sandbox, production] }
+    UpdatePaymentLinkRequest:
+      type: object
+      description: amount_type/amount are immutable and not editable here.
+      properties:
+        title: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        is_active: { type: boolean, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        min_amount: { type: integer, nullable: true }
+        max_amount: { type: integer, nullable: true }
+    InitiateCheckoutRequest:
+      type: object
+      description: amount is only honored for open-amount links.
+      properties:
+        amount: { type: integer }
+        customer_name: { type: string, nullable: true }
+        customer_email: { type: string, nullable: true }
+    PaymentLinkResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        slug: { type: string }
+        public_url: { type: string }
+        title: { type: string }
+        description: { type: string }
+        amount_type: { type: string }
+        amount: { type: integer, nullable: true }
+        currency: { type: string }
+        min_amount: { type: integer, nullable: true }
+        max_amount: { type: integer, nullable: true }
+        is_active: { type: boolean }
+        expires_at: { type: string, format: date-time, nullable: true }
+        environment: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PublicPaymentLinkResponse:
+      type: object
+      description: Safe subset for the unauthenticated pay page — no merchant_id.
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        description: { type: string }
+        amount_type: { type: string }
+        amount: { type: integer, nullable: true }
+        currency: { type: string }
+        min_amount: { type: integer }
+        max_amount: { type: integer }
+        is_available: { type: boolean }
+        reason: { type: string, enum: [inactive, expired, ''] }
+        environment: { type: string }

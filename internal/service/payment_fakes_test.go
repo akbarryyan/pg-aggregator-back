@@ -26,6 +26,10 @@ type fakePaymentRepo struct {
 	byID   map[uuid.UUID]*payment.Payment
 	byRef  map[string]uuid.UUID
 	byProv map[string]uuid.UUID
+	// getByIDCalls counts GetByID invocations — used to assert batch
+	// callers (e.g. ReconcilePendingPayments) reuse already-fetched rows
+	// instead of re-fetching each one by ID.
+	getByIDCalls int
 }
 
 func newFakePaymentRepo() *fakePaymentRepo {
@@ -54,6 +58,7 @@ func (f *fakePaymentRepo) Create(ctx context.Context, p *payment.Payment) error 
 func (f *fakePaymentRepo) GetByID(ctx context.Context, id uuid.UUID) (*payment.Payment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.getByIDCalls++
 	p, ok := f.byID[id]
 	if !ok {
 		return nil, payment.ErrPaymentNotFound
@@ -253,6 +258,9 @@ func (f *fakeMerchantProviderConfigRepo) ListEnabledByMerchantAndPaymentMethod(
 
 type fakeMerchantRepo struct {
 	byID map[uuid.UUID]*merchant.Merchant
+	// getByIDCalls counts GetByID invocations — used to assert batch
+	// callers cache/reuse merchant lookups instead of re-querying per item.
+	getByIDCalls int
 }
 
 func newFakeMerchantRepo() *fakeMerchantRepo {
@@ -260,6 +268,7 @@ func newFakeMerchantRepo() *fakeMerchantRepo {
 }
 
 func (f *fakeMerchantRepo) GetByID(ctx context.Context, id uuid.UUID) (*merchant.Merchant, error) {
+	f.getByIDCalls++
 	m, ok := f.byID[id]
 	if !ok {
 		return nil, merchant.ErrMerchantNotFound
@@ -282,6 +291,9 @@ type fakeMerchantCallbackRepo struct {
 	mu      sync.Mutex
 	byID    map[uuid.UUID]*merchant.CallbackDelivery
 	created []*merchant.CallbackDelivery
+	// getByIDCalls counts GetByID invocations — used to assert batch
+	// retry reuses already-fetched rows instead of re-fetching each by ID.
+	getByIDCalls int
 }
 
 func newFakeMerchantCallbackRepo() *fakeMerchantCallbackRepo {
@@ -302,6 +314,7 @@ func (f *fakeMerchantCallbackRepo) Create(ctx context.Context, d *merchant.Callb
 func (f *fakeMerchantCallbackRepo) GetByID(ctx context.Context, id uuid.UUID) (*merchant.CallbackDelivery, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.getByIDCalls++
 	d, ok := f.byID[id]
 	if !ok {
 		return nil, fmt.Errorf("callback delivery not found")

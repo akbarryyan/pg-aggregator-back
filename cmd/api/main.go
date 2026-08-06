@@ -70,21 +70,33 @@ func main() {
 		WithMerchantCallbackDeps(merchantRepo, callbackRepo).
 		WithSandboxProvider(sandboxAdapter)
 	paymentLinkService := service.NewPaymentLinkService(paymentLinkRepo, paymentRepo, paymentService)
-	providerRoutingService := service.NewProviderRoutingService(merchantProviderConfigRepo, providerRouter)
 	authService := service.NewAuthService(adminRepo, cfg.Security.JWTSecret).
 		WithMerchantAuth(merchantUserRepo, merchantRepo)
 	apiKeyService := service.NewMerchantAPIKeyService(apiKeyRepo, merchantRepo)
-	adminService := service.NewAdminService(merchantRepo, paymentRepo, webhookEventRepo, merchantProviderConfigRepo, providerRouter).
+	// AdminService (the original god-object) has been fully split, per
+	// project backlog item #9, into these cohesive services — it no longer
+	// exists as a type.
+	adminPaymentService := service.NewAdminPaymentService(paymentRepo, merchantRepo)
+	adminMerchantService := service.NewAdminMerchantService(merchantRepo, merchantProviderConfigRepo, adminPaymentService)
+	adminProviderService := service.NewAdminProviderService(paymentRepo, merchantProviderConfigRepo, providerRouter)
+	adminDashboardService := service.NewAdminDashboardService(merchantRepo, paymentRepo, webhookEventRepo, adminPaymentService)
+	adminNotificationService := service.NewAdminNotificationService(paymentRepo, webhookEventRepo).
 		WithCallbackRepo(callbackRepo)
+	adminLogService := service.NewAdminLogService(paymentRepo, webhookEventRepo)
+	adminCallbackService := service.NewAdminCallbackService(callbackRepo)
 
 	paymentHandler := handler.NewPaymentHandler(paymentService, cfg.App.FrontendURL)
 	webhookHandler := handler.NewWebhookHandler(paymentService)
-	providerRoutingHandler := handler.NewProviderRoutingHandler(providerRoutingService)
 	authHandler := handler.NewAuthHandler(authService)
-	adminHandler := handler.NewAdminHandler(adminService, paymentService, cfg.App.FrontendURL).
+	adminHandler := handler.NewAdminHandler(paymentService, cfg.App.FrontendURL).
 		WithAPIKeyService(apiKeyService).
-		WithAuthService(authService)
-	merchantHandler := handler.NewMerchantHandler(adminService, paymentService, apiKeyService, authService, cfg.App.FrontendURL)
+		WithAuthService(authService).
+		WithMerchantAndPaymentServices(adminPaymentService, adminMerchantService).
+		WithProviderService(adminProviderService).
+		WithReportingServices(adminDashboardService, adminNotificationService, adminLogService, adminCallbackService)
+	merchantHandler := handler.NewMerchantHandler(paymentService, apiKeyService, authService, cfg.App.FrontendURL).
+		WithMerchantAndPaymentServices(adminPaymentService, adminMerchantService).
+		WithReportingServices(adminDashboardService, adminNotificationService, adminCallbackService)
 	paymentLinkHandler := handler.NewPaymentLinkHandler(paymentLinkService, cfg.App.FrontendURL)
 	authMiddleware := middleware.NewAuthMiddleware(authService)
 	merchantAPIAuth := middleware.NewMerchantAPIAuthMiddleware(apiKeyService)
@@ -93,9 +105,15 @@ func main() {
 	// rules): login is the classic brute-force target so it gets a tight
 	// budget; webhook/checkout-polling/merchant-API get a looser one just
 	// to blunt flooding, since they're otherwise legitimate high-frequency
-	// traffic. Per-IP, in-process — see internal/middleware/rate_limit.go.
-	authRateLimiter := middleware.NewIPRateLimiter(5, 5)      // 5 req/min, burst 5
-	publicRateLimiter := middleware.NewIPRateLimiter(120, 30) // 120 req/min, burst 30
+	// traffic. sensitiveRateLimiter sits between the two: applied to
+	// already-authenticated account-mutation actions (change password,
+	// create/rotate/revoke API keys, regenerate webhook secret) that were
+	// previously unlimited — a stolen/leaked token could otherwise hammer
+	// them with no throttling at all. Per-IP, in-process — see
+	// internal/middleware/rate_limit.go.
+	authRateLimiter := middleware.NewIPRateLimiter(5, 5)       // 5 req/min, burst 5
+	publicRateLimiter := middleware.NewIPRateLimiter(120, 30)  // 120 req/min, burst 30
+	sensitiveRateLimiter := middleware.NewIPRateLimiter(10, 5) // 10 req/min, burst 5
 
 	// Background jobs: expire unpaid payments past their deadline, auto-retry
 	// failed merchant callbacks, and evict idle rate-limit buckets. A single
@@ -111,10 +129,11 @@ func main() {
 	go scheduler.RunPeriodic(bgCtx, 10*time.Minute, "rate-limiter-cleanup", func(ctx context.Context) error {
 		authRateLimiter.Cleanup(30 * time.Minute)
 		publicRateLimiter.Cleanup(30 * time.Minute)
+		sensitiveRateLimiter.Cleanup(30 * time.Minute)
 		return nil
 	})
 
-	router := setupRouter(paymentHandler, webhookHandler, providerRoutingHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter)
+	router := setupRouter(paymentHandler, webhookHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter)
 
 	c := cors.New(cors.Options{
 		AllowedOrigins:   []string{cfg.App.FrontendURL},
@@ -179,7 +198,6 @@ func initDB(cfg *config.Config) (*sql.DB, error) {
 func setupRouter(
 	paymentHandler *handler.PaymentHandler,
 	webhookHandler *handler.WebhookHandler,
-	providerRoutingHandler *handler.ProviderRoutingHandler,
 	authHandler *handler.AuthHandler,
 	adminHandler *handler.AdminHandler,
 	merchantHandler *handler.MerchantHandler,
@@ -188,7 +206,8 @@ func setupRouter(
 	merchantAPIAuth *middleware.MerchantAPIAuthMiddleware,
 	authRateLimiter *middleware.IPRateLimiter,
 	publicRateLimiter *middleware.IPRateLimiter,
-) *mux.Router {
+	sensitiveRateLimiter *middleware.IPRateLimiter,
+) http.Handler {
 	r := mux.NewRouter()
 
 	api := r.PathPrefix("/api/v1").Subrouter()
@@ -198,12 +217,15 @@ func setupRouter(
 	api.Handle("/auth/register", authRateLimiter.Limit(http.HandlerFunc(authHandler.RegisterMerchant))).Methods("POST")
 	api.HandleFunc("/auth/me", authHandler.GetMerchantMe).Methods("GET")
 	api.HandleFunc("/auth/profile", authHandler.UpdateMerchantProfile).Methods("PUT")
-	api.HandleFunc("/auth/change-password", authHandler.ChangeMerchantPassword).Methods("POST")
+	// change-password is auth-gated (JWT parsed inside the handler) but was
+	// previously unlimited — a leaked/stolen token could hammer it with no
+	// throttling at all.
+	api.Handle("/auth/change-password", sensitiveRateLimiter.Limit(http.HandlerFunc(authHandler.ChangeMerchantPassword))).Methods("POST")
 
 	api.Handle("/auth/admin/login", authRateLimiter.Limit(http.HandlerFunc(authHandler.LoginAdmin))).Methods("POST")
 	api.HandleFunc("/auth/admin/me", authHandler.GetMe).Methods("GET")
 	api.HandleFunc("/auth/admin/profile", authHandler.UpdateProfile).Methods("PUT")
-	api.HandleFunc("/auth/admin/change-password", authHandler.ChangePassword).Methods("POST")
+	api.Handle("/auth/admin/change-password", sensitiveRateLimiter.Limit(http.HandlerFunc(authHandler.ChangePassword))).Methods("POST")
 
 	// Protected admin panel APIs
 	adminAPI := api.PathPrefix("/admin").Subrouter()
@@ -223,8 +245,10 @@ func setupRouter(
 	adminAPI.HandleFunc("/merchants/{id}/status", adminHandler.SetMerchantActive).Methods("PUT")
 	adminAPI.HandleFunc("/merchants/{id}/payments", adminHandler.ListMerchantPayments).Methods("GET")
 	adminAPI.HandleFunc("/merchants/{id}/api-keys", adminHandler.ListMerchantAPIKeys).Methods("GET")
-	adminAPI.HandleFunc("/merchants/{id}/api-keys", adminHandler.UpsertMerchantAPIKey).Methods("PUT", "POST")
-	adminAPI.HandleFunc("/merchants/{id}/api-keys/{keyId}", adminHandler.DeleteMerchantAPIKey).Methods("DELETE")
+	// API key create/rotate/revoke — sensitive account-mutation actions,
+	// previously unlimited once past JWT auth.
+	adminAPI.Handle("/merchants/{id}/api-keys", sensitiveRateLimiter.Limit(http.HandlerFunc(adminHandler.UpsertMerchantAPIKey))).Methods("PUT", "POST")
+	adminAPI.Handle("/merchants/{id}/api-keys/{keyId}", sensitiveRateLimiter.Limit(http.HandlerFunc(adminHandler.DeleteMerchantAPIKey))).Methods("DELETE")
 	adminAPI.HandleFunc("/providers", adminHandler.ListProviders).Methods("GET")
 	adminAPI.HandleFunc("/providers/{name}", adminHandler.GetProvider).Methods("GET")
 	adminAPI.HandleFunc("/providers/{name}/health", adminHandler.UpdateProviderHealth).Methods("PUT")
@@ -255,12 +279,14 @@ func setupRouter(
 	merchantDash.HandleFunc("/payments", merchantHandler.CreatePayment).Methods("POST")
 	merchantDash.HandleFunc("/payments/{id}", merchantHandler.GetPayment).Methods("GET")
 	merchantDash.HandleFunc("/api-keys", merchantHandler.ListAPIKeys).Methods("GET")
-	merchantDash.HandleFunc("/api-keys", merchantHandler.UpsertAPIKey).Methods("PUT", "POST")
-	merchantDash.HandleFunc("/api-keys/{keyId}", merchantHandler.DeleteAPIKey).Methods("DELETE")
+	// API key create/rotate/revoke and webhook-secret rotation — sensitive
+	// account-mutation actions, previously unlimited once past JWT auth.
+	merchantDash.Handle("/api-keys", sensitiveRateLimiter.Limit(http.HandlerFunc(merchantHandler.UpsertAPIKey))).Methods("PUT", "POST")
+	merchantDash.Handle("/api-keys/{keyId}", sensitiveRateLimiter.Limit(http.HandlerFunc(merchantHandler.DeleteAPIKey))).Methods("DELETE")
 	merchantDash.HandleFunc("/business", merchantHandler.GetBusiness).Methods("GET")
 	merchantDash.HandleFunc("/business", merchantHandler.UpdateBusiness).Methods("PUT")
 	merchantDash.HandleFunc("/webhook-secret", merchantHandler.GetWebhookSecret).Methods("GET")
-	merchantDash.HandleFunc("/webhook-secret/regenerate", merchantHandler.RegenerateWebhookSecret).Methods("POST")
+	merchantDash.Handle("/webhook-secret/regenerate", sensitiveRateLimiter.Limit(http.HandlerFunc(merchantHandler.RegenerateWebhookSecret))).Methods("POST")
 	merchantDash.HandleFunc("/payment-links", paymentLinkHandler.ListPaymentLinks).Methods("GET")
 	merchantDash.HandleFunc("/payment-links", paymentLinkHandler.CreatePaymentLink).Methods("POST")
 	merchantDash.HandleFunc("/payment-links/{id}", paymentLinkHandler.GetPaymentLink).Methods("GET")
@@ -289,11 +315,6 @@ func setupRouter(
 	// Provider webhook (e.g. Cashi) — signature-verified downstream, but still
 	// rate limited per source IP to blunt flooding/DoS attempts.
 	api.Handle("/provider-webhooks/{providerName}", publicRateLimiter.Limit(http.HandlerFunc(webhookHandler.HandleProviderWebhook))).Methods("POST")
-	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.ListMerchantProviderConfigs).Methods("GET")
-	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.UpsertMerchantProviderConfig).Methods("POST", "PUT")
-	api.HandleFunc("/merchants/{merchantID}/provider-configs", providerRoutingHandler.DeleteMerchantProviderConfig).Methods("DELETE")
-	api.HandleFunc("/provider-healths", providerRoutingHandler.ListProviderHealths).Methods("GET")
-	api.HandleFunc("/provider-healths/{providerName}", providerRoutingHandler.UpdateProviderHealth).Methods("PUT")
 
 	api.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -301,5 +322,8 @@ func setupRouter(
 		w.Write([]byte(`{"status":"ok"}`))
 	}).Methods("GET")
 
-	return r
+	// Wraps the whole router (not mux.Router.Use, which gorilla/mux does
+	// NOT run for unmatched routes) so every response — including a 404 for
+	// an unknown path — carries a correlation ID (project backlog #10).
+	return middleware.RequestID(r)
 }

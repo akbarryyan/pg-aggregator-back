@@ -22,7 +22,7 @@ func NewAuthHandler(authService *service.AuthService) *AuthHandler {
 func (h *AuthHandler) LoginAdmin(w http.ResponseWriter, r *http.Request) {
 	var req admin.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Errorf("Failed to decode admin login request: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to decode admin login request: %v", err)
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -39,7 +39,7 @@ func (h *AuthHandler) LoginAdmin(w http.ResponseWriter, r *http.Request) {
 		case admin.ErrAdminInactive:
 			respondError(w, http.StatusForbidden, "Admin account is inactive")
 		default:
-			logger.Errorf("Admin login failed: %v", err)
+			logger.ErrorfCtx(r.Context(), "Admin login failed: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to sign in")
 		}
 		return
@@ -60,7 +60,7 @@ func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusUnauthorized, "Admin not found")
 			return
 		}
-		logger.Errorf("Failed to get admin profile: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get admin profile: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to get profile")
 		return
 	}
@@ -81,7 +81,7 @@ func (h *AuthHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 
 	var req admin.UpdateProfileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Errorf("Failed to decode update profile request: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to decode update profile request: %v", err)
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -101,7 +101,7 @@ func (h *AuthHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		case admin.ErrAdminNotFound:
 			respondError(w, http.StatusUnauthorized, "Admin not found")
 		default:
-			logger.Errorf("Failed to update admin profile: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to update admin profile: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to update profile")
 		}
 		return
@@ -118,7 +118,7 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	var req admin.ChangePasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Errorf("Failed to decode change password request: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to decode change password request: %v", err)
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -137,7 +137,7 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		case admin.ErrAdminNotFound:
 			respondError(w, http.StatusUnauthorized, "Admin not found")
 		default:
-			logger.Errorf("Failed to change admin password: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to change admin password: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to change password")
 		}
 		return
@@ -175,7 +175,7 @@ func (h *AuthHandler) RegisterMerchant(w http.ResponseWriter, r *http.Request) {
 		case merchant.ErrMerchantAlreadyExists:
 			respondError(w, http.StatusConflict, err.Error())
 		default:
-			logger.Errorf("Merchant registration failed: %v", err)
+			logger.ErrorfCtx(r.Context(), "Merchant registration failed: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to register")
 		}
 		return
@@ -201,7 +201,7 @@ func (h *AuthHandler) LoginMerchant(w http.ResponseWriter, r *http.Request) {
 		case merchant.ErrMerchantUserInactive:
 			respondError(w, http.StatusForbidden, "Merchant account is inactive")
 		default:
-			logger.Errorf("Merchant login failed: %v", err)
+			logger.ErrorfCtx(r.Context(), "Merchant login failed: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to sign in")
 		}
 		return
@@ -220,7 +220,7 @@ func (h *AuthHandler) GetMerchantMe(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusUnauthorized, "User not found")
 			return
 		}
-		logger.Errorf("Failed to get merchant profile: %v", err)
+		logger.ErrorfCtx(r.Context(), "Failed to get merchant profile: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to get profile")
 		return
 	}
@@ -245,7 +245,7 @@ func (h *AuthHandler) UpdateMerchantProfile(w http.ResponseWriter, r *http.Reque
 		case merchant.ErrMerchantUserNotFound:
 			respondError(w, http.StatusUnauthorized, "User not found")
 		default:
-			logger.Errorf("Failed to update merchant profile: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to update merchant profile: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to update profile")
 		}
 		return
@@ -273,7 +273,7 @@ func (h *AuthHandler) ChangeMerchantPassword(w http.ResponseWriter, r *http.Requ
 		case merchant.ErrMerchantCurrentPasswordInvalid:
 			respondError(w, http.StatusUnauthorized, "Current password is incorrect")
 		default:
-			logger.Errorf("Failed to change merchant password: %v", err)
+			logger.ErrorfCtx(r.Context(), "Failed to change merchant password: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to change password")
 		}
 		return

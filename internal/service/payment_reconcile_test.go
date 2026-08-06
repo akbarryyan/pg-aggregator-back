@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -218,5 +219,33 @@ func TestReconcilePendingPayments_ChecksOnlyPending(t *testing.T) {
 	}
 	if results[0].PaymentID != pending.ID {
 		t.Errorf("expected reconciled payment to be the pending one, got %v", results[0].PaymentID)
+	}
+}
+
+// TestReconcilePendingPayments_DoesNotRefetchByID covers project backlog
+// item #6 (N+1 audit finding #3): ReconcilePendingPayments used to call
+// ReconcilePayment(ctx, id) per row, which re-fetched each payment by ID
+// even though ListAdmin had already loaded it — a redundant SELECT per
+// payment in the batch. It now reconciles the already-fetched row directly.
+func TestReconcilePendingPayments_DoesNotRefetchByID(t *testing.T) {
+	svc, paymentRepo, _, router := newWebhookTestService()
+	for i := 0; i < 3; i++ {
+		p := seedPayment(t, paymentRepo, payment.StatusPending, fmt.Sprintf("REF-BATCH-N1-%d", i))
+		p.ExpiresAt = time.Now().Add(10 * time.Minute)
+		paymentRepo.byID[p.ID] = p
+	}
+	router.RegisterProvider(&fakeProvider{name: "cashi", statusResp: &domainProvider.NormalizedPaymentStatus{Status: "pending"}})
+
+	paymentRepo.getByIDCalls = 0
+
+	results, err := svc.ReconcilePendingPayments(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 payments reconciled, got %d", len(results))
+	}
+	if paymentRepo.getByIDCalls != 0 {
+		t.Errorf("expected 0 GetByID calls (rows already fetched via ListAdmin), got %d", paymentRepo.getByIDCalls)
 	}
 }

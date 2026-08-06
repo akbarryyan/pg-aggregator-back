@@ -134,6 +134,61 @@ func (r *PaymentRepository) SumPaidAmount(ctx context.Context) (int64, error) {
 	return total, nil
 }
 
+// StatusBreakdown is a one-query summary of payment counts per status (plus
+// total paid amount), optionally scoped by merchant/environment. Exists so
+// callers building a dashboard summary don't have to issue one List+Count
+// round-trip per status (see AdminPaymentService.StatusBreakdown).
+type StatusBreakdown struct {
+	Total      int64
+	Paid       int64
+	Pending    int64
+	Failed     int64
+	Expired    int64
+	Cancelled  int64
+	PaidAmount int64
+}
+
+// StatusBreakdownFiltered returns one row of counts per status (+ paid
+// amount) for payments optionally scoped by merchant and/or environment.
+func (r *PaymentRepository) StatusBreakdownFiltered(
+	ctx context.Context,
+	merchantID *uuid.UUID,
+	environment string,
+) (*StatusBreakdown, error) {
+	query := `
+		SELECT
+			COUNT(*) AS total,
+			COUNT(*) FILTER (WHERE status = 'paid') AS paid,
+			COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+			COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+			COUNT(*) FILTER (WHERE status = 'expired') AS expired,
+			COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled,
+			COALESCE(SUM(amount) FILTER (WHERE status = 'paid'), 0) AS paid_amount
+		FROM payments
+		WHERE 1=1
+	`
+	args := make([]interface{}, 0, 2)
+	argN := 1
+	if merchantID != nil {
+		query += fmt.Sprintf(" AND merchant_id = $%d", argN)
+		args = append(args, *merchantID)
+		argN++
+	}
+	if environment != "" {
+		query += fmt.Sprintf(" AND environment = $%d", argN)
+		args = append(args, payment.NormalizeEnvironment(environment))
+	}
+
+	var s StatusBreakdown
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(
+		&s.Total, &s.Paid, &s.Pending, &s.Failed, &s.Expired, &s.Cancelled, &s.PaidAmount,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get status breakdown: %w", err)
+	}
+	return &s, nil
+}
+
 // DailyPaymentStat is one day of payment aggregates for dashboard charts.
 type DailyPaymentStat struct {
 	Day        time.Time

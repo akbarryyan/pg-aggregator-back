@@ -242,3 +242,47 @@ func TestExecuteCallbackDelivery_SignsPayloadWithHMAC(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestRetryDueMerchantCallbacks_ReusesRowsAndCachesWebhookSecret covers
+// project backlog item #6 (N+1 audit finding #4): RetryDueMerchantCallbacks
+// used to call RetryMerchantCallback(ctx, id) per due row, which re-fetched
+// each delivery by ID even though ListDueForRetry had already loaded it,
+// and re-fetched the merchant (for its webhook secret) on every single
+// delivery even when several due deliveries belonged to the same merchant.
+// It now reuses the already-fetched rows and shares one secret cache
+// across the batch.
+func TestRetryDueMerchantCallbacks_ReusesRowsAndCachesWebhookSecret(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	svc, merchantRepo, callbackRepo := newCallbackTestService(t)
+
+	sameMerchant := uuid.New()
+	merchantRepo.byID[sameMerchant] = &merchant.Merchant{ID: sameMerchant, WebhookSecret: strPtr("existing-secret")}
+
+	past := time.Now().UTC().Add(-1 * time.Minute)
+	d1 := seedCallbackDelivery(callbackRepo, merchant.CallbackStatusFailed, server.URL, 1, &past)
+	d1.MerchantID = sameMerchant
+	d2 := seedCallbackDelivery(callbackRepo, merchant.CallbackStatusFailed, server.URL, 1, &past)
+	d2.MerchantID = sameMerchant
+
+	callbackRepo.getByIDCalls = 0
+	merchantRepo.getByIDCalls = 0
+
+	count, err := svc.RetryDueMerchantCallbacks(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 due deliveries retried, got %d", count)
+	}
+
+	if callbackRepo.getByIDCalls != 0 {
+		t.Errorf("expected 0 callbackRepo.GetByID calls (rows already fetched via ListDueForRetry), got %d", callbackRepo.getByIDCalls)
+	}
+	if merchantRepo.getByIDCalls != 1 {
+		t.Errorf("expected exactly 1 merchantRepo.GetByID call (secret cached across both deliveries for the same merchant), got %d", merchantRepo.getByIDCalls)
+	}
+}

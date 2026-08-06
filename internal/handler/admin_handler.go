@@ -20,20 +20,24 @@ import (
 )
 
 type AdminHandler struct {
-	adminService   *service.AdminService
-	paymentService *service.PaymentService
-	apiKeyService  *service.MerchantAPIKeyService
-	authService    *service.AuthService
-	frontendURL    string
+	adminPaymentService      *service.AdminPaymentService
+	adminMerchantService     *service.AdminMerchantService
+	adminProviderService     *service.AdminProviderService
+	adminDashboardService    *service.AdminDashboardService
+	adminNotificationService *service.AdminNotificationService
+	adminLogService          *service.AdminLogService
+	adminCallbackService     *service.AdminCallbackService
+	paymentService           *service.PaymentService
+	apiKeyService            *service.MerchantAPIKeyService
+	authService              *service.AuthService
+	frontendURL              string
 }
 
 func NewAdminHandler(
-	adminService *service.AdminService,
 	paymentService *service.PaymentService,
 	frontendURL string,
 ) *AdminHandler {
 	return &AdminHandler{
-		adminService:   adminService,
 		paymentService: paymentService,
 		frontendURL:    strings.TrimRight(frontendURL, "/"),
 	}
@@ -49,8 +53,42 @@ func (h *AdminHandler) WithAuthService(svc *service.AuthService) *AdminHandler {
 	return h
 }
 
+// WithMerchantAndPaymentServices wires the AdminMerchantService/
+// AdminPaymentService split out of AdminService (project backlog #9).
+func (h *AdminHandler) WithMerchantAndPaymentServices(
+	adminPaymentService *service.AdminPaymentService,
+	adminMerchantService *service.AdminMerchantService,
+) *AdminHandler {
+	h.adminPaymentService = adminPaymentService
+	h.adminMerchantService = adminMerchantService
+	return h
+}
+
+// WithProviderService wires the AdminProviderService split out of
+// AdminService (project backlog #9).
+func (h *AdminHandler) WithProviderService(adminProviderService *service.AdminProviderService) *AdminHandler {
+	h.adminProviderService = adminProviderService
+	return h
+}
+
+// WithReportingServices wires the dashboard/notification/log/callback
+// services split out of AdminService — the last increment of project
+// backlog item #9, after which AdminService itself no longer exists.
+func (h *AdminHandler) WithReportingServices(
+	dashboard *service.AdminDashboardService,
+	notification *service.AdminNotificationService,
+	log *service.AdminLogService,
+	callback *service.AdminCallbackService,
+) *AdminHandler {
+	h.adminDashboardService = dashboard
+	h.adminNotificationService = notification
+	h.adminLogService = log
+	h.adminCallbackService = callback
+	return h
+}
+
 func (h *AdminHandler) GetDashboardSummary(w http.ResponseWriter, r *http.Request) {
-	summary, err := h.adminService.GetDashboardSummary(r.Context())
+	summary, err := h.adminDashboardService.GetDashboardSummary(r.Context())
 	if err != nil {
 		logger.Errorf("Failed to get admin dashboard summary: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load dashboard summary")
@@ -67,7 +105,7 @@ func (h *AdminHandler) GetDashboardCharts(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	charts, err := h.adminService.GetDashboardCharts(r.Context(), days)
+	charts, err := h.adminDashboardService.GetDashboardCharts(r.Context(), days)
 	if err != nil {
 		logger.Errorf("Failed to get admin dashboard charts: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load dashboard charts")
@@ -96,7 +134,7 @@ func (h *AdminHandler) ListPayments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	environment := strings.TrimSpace(r.URL.Query().Get("environment"))
-	result, err := h.adminService.ListPayments(r.Context(), status, search, merchantID, dateFrom, dateTo, environment, limit, offset)
+	result, err := h.adminPaymentService.ListPayments(r.Context(), status, search, merchantID, dateFrom, dateTo, environment, limit, offset)
 	if err != nil {
 		logger.Errorf("Failed to list admin payments: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list payments")
@@ -153,7 +191,7 @@ func (h *AdminHandler) ExportPayments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	environment := strings.TrimSpace(r.URL.Query().Get("environment"))
-	rows, err := h.adminService.ExportPayments(r.Context(), status, search, merchantID, dateFrom, dateTo, environment)
+	rows, err := h.adminPaymentService.ExportPayments(r.Context(), status, search, merchantID, dateFrom, dateTo, environment)
 	if err != nil {
 		logger.Errorf("Failed to export payments: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to export payments")
@@ -237,7 +275,7 @@ func (h *AdminHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	detail, err := h.adminService.GetPayment(r.Context(), id)
+	detail, err := h.adminPaymentService.GetPayment(r.Context(), id)
 	if err != nil {
 		if err == payment.ErrPaymentNotFound {
 			respondError(w, http.StatusNotFound, "Payment not found")
@@ -254,7 +292,7 @@ func (h *AdminHandler) ListMerchants(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parseLimitOffset(r, 20, 0)
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	result, err := h.adminService.ListMerchants(r.Context(), search, status, limit, offset)
+	result, err := h.adminMerchantService.ListMerchants(r.Context(), search, status, limit, offset)
 	if err != nil {
 		logger.Errorf("Failed to list admin merchants: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list merchants")
@@ -271,7 +309,7 @@ func (h *AdminHandler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.adminService.CreateMerchant(r.Context(), &req)
+	created, err := h.adminMerchantService.CreateMerchant(r.Context(), &req)
 	if err != nil {
 		switch err {
 		case merchant.ErrMerchantNameRequired,
@@ -294,7 +332,7 @@ func (h *AdminHandler) ExportMerchants(w http.ResponseWriter, r *http.Request) {
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 
-	rows, err := h.adminService.ExportMerchants(r.Context(), search, status)
+	rows, err := h.adminMerchantService.ExportMerchants(r.Context(), search, status)
 	if err != nil {
 		logger.Errorf("Failed to export merchants: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to export merchants")
@@ -349,7 +387,7 @@ func (h *AdminHandler) GetMerchant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m, err := h.adminService.GetMerchant(r.Context(), id)
+	m, err := h.adminMerchantService.GetMerchant(r.Context(), id)
 	if err != nil {
 		if err == merchant.ErrMerchantNotFound {
 			respondError(w, http.StatusNotFound, "Merchant not found")
@@ -375,7 +413,7 @@ func (h *AdminHandler) UpdateMerchant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m, err := h.adminService.UpdateMerchant(r.Context(), id, &req)
+	m, err := h.adminMerchantService.UpdateMerchant(r.Context(), id, &req)
 	if err != nil {
 		switch err {
 		case merchant.ErrMerchantNotFound:
@@ -406,7 +444,7 @@ func (h *AdminHandler) SetMerchantActive(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	m, err := h.adminService.SetMerchantActive(r.Context(), id, body.IsActive)
+	m, err := h.adminMerchantService.SetMerchantActive(r.Context(), id, body.IsActive)
 	if err != nil {
 		if err == merchant.ErrMerchantNotFound {
 			respondError(w, http.StatusNotFound, "Merchant not found")
@@ -421,13 +459,13 @@ func (h *AdminHandler) SetMerchantActive(w http.ResponseWriter, r *http.Request)
 
 func (h *AdminHandler) ListProviders(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"items": h.adminService.ListProviders(),
+		"items": h.adminProviderService.ListProviders(),
 	})
 }
 
 func (h *AdminHandler) GetProvider(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(mux.Vars(r)["name"])
-	detail, err := h.adminService.GetProviderDetail(r.Context(), name)
+	detail, err := h.adminProviderService.GetProviderDetail(r.Context(), name)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			respondError(w, http.StatusNotFound, "Provider not found")
@@ -448,7 +486,7 @@ func (h *AdminHandler) UpdateProviderHealth(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	detail, err := h.adminService.UpdateProviderHealth(r.Context(), name, &req)
+	detail, err := h.adminProviderService.UpdateProviderHealth(r.Context(), name, &req)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			respondError(w, http.StatusNotFound, "Provider not found")
@@ -471,7 +509,7 @@ func (h *AdminHandler) ListMerchantProviderConfigs(w http.ResponseWriter, r *htt
 		respondError(w, http.StatusBadRequest, "Invalid merchant ID")
 		return
 	}
-	items, err := h.adminService.ListMerchantProviderConfigs(r.Context(), id)
+	items, err := h.adminMerchantService.ListMerchantProviderConfigs(r.Context(), id)
 	if err != nil {
 		if err == merchant.ErrMerchantNotFound {
 			respondError(w, http.StatusNotFound, "Merchant not found")
@@ -497,7 +535,8 @@ func (h *AdminHandler) UpsertMerchantProviderConfig(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if err := h.adminService.UpsertMerchantProviderConfig(r.Context(), id, &req); err != nil {
+	items, err := h.adminMerchantService.UpsertMerchantProviderConfig(r.Context(), id, &req)
+	if err != nil {
 		switch err {
 		case merchant.ErrMerchantNotFound:
 			respondError(w, http.StatusNotFound, "Merchant not found")
@@ -508,12 +547,6 @@ func (h *AdminHandler) UpsertMerchantProviderConfig(w http.ResponseWriter, r *ht
 			logger.Errorf("Failed to upsert merchant provider config: %v", err)
 			respondError(w, http.StatusInternalServerError, "Failed to save provider config")
 		}
-		return
-	}
-
-	items, err := h.adminService.ListMerchantProviderConfigs(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Saved but failed to reload configs")
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{"items": items})
@@ -532,7 +565,7 @@ func (h *AdminHandler) DeleteMerchantProviderConfig(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if err := h.adminService.DeleteMerchantProviderConfig(r.Context(), id, paymentMethod, providerName); err != nil {
+	if err := h.adminMerchantService.DeleteMerchantProviderConfig(r.Context(), id, paymentMethod, providerName); err != nil {
 		logger.Errorf("Failed to delete merchant provider config: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to delete provider config")
 		return
@@ -542,7 +575,7 @@ func (h *AdminHandler) DeleteMerchantProviderConfig(w http.ResponseWriter, r *ht
 
 func (h *AdminHandler) ListRouting(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parseLimitOffset(r, 50, 0)
-	result, err := h.adminService.ListRouting(r.Context(), limit, offset)
+	result, err := h.adminProviderService.ListRouting(r.Context(), limit, offset)
 	if err != nil {
 		logger.Errorf("Failed to list routing: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list routing")
@@ -558,7 +591,7 @@ func (h *AdminHandler) ListReconciliation(w http.ResponseWriter, r *http.Request
 			limit = v
 		}
 	}
-	result, err := h.adminService.ListReconciliationCandidates(r.Context(), limit)
+	result, err := h.adminProviderService.ListReconciliationCandidates(r.Context(), limit)
 	if err != nil {
 		logger.Errorf("Failed to list reconciliation candidates: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list reconciliation candidates")
@@ -645,7 +678,7 @@ func (h *AdminHandler) ListNotifications(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	result, err := h.adminService.ListNotifications(r.Context(), limit)
+	result, err := h.adminNotificationService.ListNotifications(r.Context(), limit)
 	if err != nil {
 		logger.Errorf("Failed to list admin notifications: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to load notifications")
@@ -661,7 +694,7 @@ func (h *AdminHandler) ListPaymentEvents(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	events, err := h.adminService.ListPaymentEvents(r.Context(), id)
+	events, err := h.adminLogService.ListPaymentEvents(r.Context(), id)
 	if err != nil {
 		if err == payment.ErrPaymentNotFound {
 			respondError(w, http.StatusNotFound, "Payment not found")
@@ -681,7 +714,7 @@ func (h *AdminHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	detail, err := h.adminService.GetLog(r.Context(), id)
+	detail, err := h.adminLogService.GetLog(r.Context(), id)
 	if err != nil {
 		if err == service.ErrWebhookEventNotFound {
 			respondError(w, http.StatusNotFound, "Log event not found")
@@ -830,7 +863,7 @@ func (h *AdminHandler) ListMerchantPayments(w http.ResponseWriter, r *http.Reque
 	}
 
 	limit, offset := parseLimitOffset(r, 20, 0)
-	result, err := h.adminService.ListMerchantPayments(r.Context(), id, limit, offset)
+	result, err := h.adminMerchantService.ListMerchantPayments(r.Context(), id, limit, offset)
 	if err != nil {
 		logger.Errorf("Failed to list merchant payments: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list merchant payments")
@@ -844,7 +877,7 @@ func (h *AdminHandler) ListLogs(w http.ResponseWriter, r *http.Request) {
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	providerName := strings.TrimSpace(r.URL.Query().Get("provider"))
 	processed := strings.TrimSpace(r.URL.Query().Get("processed"))
-	result, err := h.adminService.ListLogs(r.Context(), status, providerName, processed, limit, offset)
+	result, err := h.adminLogService.ListLogs(r.Context(), status, providerName, processed, limit, offset)
 	if err != nil {
 		logger.Errorf("Failed to list admin logs: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list logs")
@@ -866,7 +899,7 @@ func (h *AdminHandler) ListCallbacks(w http.ResponseWriter, r *http.Request) {
 		merchantID = &id
 	}
 
-	result, err := h.adminService.ListCallbacks(r.Context(), status, merchantID, limit, offset)
+	result, err := h.adminCallbackService.ListCallbacks(r.Context(), status, merchantID, limit, offset)
 	if err != nil {
 		logger.Errorf("Failed to list callbacks: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list callbacks")
@@ -881,7 +914,7 @@ func (h *AdminHandler) ListPaymentCallbacks(w http.ResponseWriter, r *http.Reque
 		respondError(w, http.StatusBadRequest, "Invalid payment ID")
 		return
 	}
-	items, err := h.adminService.ListPaymentCallbacks(r.Context(), id)
+	items, err := h.adminCallbackService.ListPaymentCallbacks(r.Context(), id)
 	if err != nil {
 		logger.Errorf("Failed to list payment callbacks: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list payment callbacks")
@@ -918,7 +951,7 @@ func (h *AdminHandler) ExportLogs(w http.ResponseWriter, r *http.Request) {
 	providerName := strings.TrimSpace(r.URL.Query().Get("provider"))
 	processed := strings.TrimSpace(r.URL.Query().Get("processed"))
 
-	rows, err := h.adminService.ExportLogs(r.Context(), status, providerName, processed)
+	rows, err := h.adminLogService.ExportLogs(r.Context(), status, providerName, processed)
 	if err != nil {
 		logger.Errorf("Failed to export logs: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to export logs")

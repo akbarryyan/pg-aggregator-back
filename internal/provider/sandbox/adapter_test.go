@@ -48,6 +48,9 @@ func TestCreatePayment_Success(t *testing.T) {
 	if resp.QRISData == nil || *resp.QRISData == "" {
 		t.Errorf("expected QRISData to be set")
 	}
+	if resp.QRISData != nil && !strings.HasPrefix(*resp.QRISData, "data:image/png;base64,") {
+		t.Errorf("expected QRISData to be a base64 PNG data URI so the checkout page can render it as an image, got %q", *resp.QRISData)
+	}
 	if resp.PaymentURL == nil || *resp.PaymentURL == "" {
 		t.Errorf("expected PaymentURL to be set")
 	}

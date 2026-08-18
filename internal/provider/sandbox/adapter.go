@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	"github.com/google/uuid"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 const ProviderName = "sandbox"
@@ -53,13 +55,15 @@ func (a *Adapter) CreatePayment(ctx context.Context, req *provider.ProviderPayme
 		expiresAt = time.Now().Add(10 * time.Minute)
 	}
 
-	// Placeholder QR payload (not a real QRIS string — for UI/demo only)
-	qr := fmt.Sprintf(
-		"data:text/plain;sandbox,order=%s,amount=%d,ref=%s",
-		req.InternalReference,
-		finalAmount,
-		ref,
-	)
+	// Encodes a placeholder payload as an actual scannable QR image (not a
+	// real QRIS EMV string — for UI/demo only) so the checkout page renders
+	// it the same way it would a real provider's QR, instead of dumping text.
+	qrPayload := fmt.Sprintf("sandbox:order=%s;amount=%d;ref=%s", req.InternalReference, finalAmount, ref)
+	png, err := qrcode.Encode(qrPayload, qrcode.Medium, 256)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: failed to generate QR image: %w", err)
+	}
+	qr := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
 	checkout := fmt.Sprintf("https://sandbox.local/pay/%s", ref)
 
 	a.mu.Lock()

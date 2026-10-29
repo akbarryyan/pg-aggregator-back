@@ -19,7 +19,9 @@ vendor/
 # Go workspace file
 go.work
 
-# Environment variables
+# Local config and DB password (secrets). .env* kept so stale pre-TOML files never get committed.
+.config.toml
+db_password
 .env
 .env.local
 .env.production

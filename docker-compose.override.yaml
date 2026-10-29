@@ -1,0 +1,53 @@
+# Local development only. Compose merges this file automatically when it
+# sits next to docker-compose.yaml; it is NOT copied to the VPS, which is
+# what makes the same `docker compose up -d` mean "production stack" there
+# and "hot-reload dev stack" here.
+
+x-dev: &dev
+  image: whuzpay-backend:dev
+  build:
+    context: .
+    target: dev
+  # Always rebuilt from the Dockerfile's dev stage; it copies no source, so
+  # this is a cache hit unless the Dockerfile changed.
+  pull_policy: build
+  # Run as you so files air writes under tmp/ aren't root-owned and the
+  # chmod-600 .config.toml stays readable.
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+  # The base file's 192m limit is sized for the production binary;
+  # compiling with go/air needs far more.
+  mem_limit: 1g
+  working_dir: /src
+  environment:
+    HOME: /tmp
+    # Dev compiles with go/air under the 1g limit; the base 160MiB would
+    # throttle the compiler's GC.
+    GOMEMLIMIT: 900MiB
+    GOCACHE: /src/tmp/go-build
+    GOMODCACHE: /src/tmp/go-mod
+    # golang:alpine has no git; without this the build fails trying to
+    # stamp VCS info from the mounted .git.
+    # -p=4 caps parallel compile jobs to keep the build within the memory limit.
+    GOFLAGS: -buildvcs=false -p=4
+  volumes:
+    - .:/src
+
+services:
+  caddy:
+    # Locally the API is reached directly on localhost:8090; Caddy would try
+    # (and fail) to get a real certificate for api.whuzpay.web.id.
+    profiles: ["prod-only"]
+
+  api:
+    <<: *dev
+    command: ["air"]
+    ports:
+      - "8090:8080"
+
+  migrate:
+    <<: *dev
+
+  postgres:
+    ports:
+      # 5432 is used by the native PostgreSQL on this machine; localhost only.
+      - "127.0.0.1:5433:5432"

@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,7 +32,10 @@ func main() {
 	logger.Init("info")
 	logger.Info("Starting Payment Gateway Aggregator API...")
 
-	cfg, err := config.Load()
+	configPath := flag.String("config", ".config.toml", "path to the TOML config file")
+	flag.Parse()
+
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		logger.Errorf("Failed to load config: %v", err)
 		os.Exit(1)
@@ -109,11 +114,18 @@ func main() {
 	// already-authenticated account-mutation actions (change password,
 	// create/rotate/revoke API keys, regenerate webhook secret) that were
 	// previously unlimited — a stolen/leaked token could otherwise hammer
-	// them with no throttling at all. Per-IP, in-process — see
-	// internal/middleware/rate_limit.go.
-	authRateLimiter := middleware.NewIPRateLimiter(5, 5)       // 5 req/min, burst 5
-	publicRateLimiter := middleware.NewIPRateLimiter(120, 30)  // 120 req/min, burst 30
-	sensitiveRateLimiter := middleware.NewIPRateLimiter(10, 5) // 10 req/min, burst 5
+	// them with no throttling at all. Per-client-IP, in-process — see
+	// internal/middleware/rate_limit.go. Budgets and the trusted reverse
+	// proxies (Caddy on the VPS) come from [rate_limit] in .config.toml.
+	trustedProxies, err := cfg.RateLimit.TrustedProxyPrefixes()
+	if err != nil {
+		// Validate already parsed these, so this only fires if the two drift.
+		logger.Errorf("Invalid rate limit config: %v", err)
+		os.Exit(1)
+	}
+	authRateLimiter := newRateLimiter(cfg.RateLimit.Auth, trustedProxies)
+	publicRateLimiter := newRateLimiter(cfg.RateLimit.Public, trustedProxies)
+	sensitiveRateLimiter := newRateLimiter(cfg.RateLimit.Sensitive, trustedProxies)
 
 	// Background jobs: expire unpaid payments past their deadline, auto-retry
 	// failed merchant callbacks, and evict idle rate-limit buckets. A single
@@ -145,7 +157,7 @@ func main() {
 	handler := c.Handler(router)
 
 	srv := &http.Server{
-		Addr:         ":" + cfg.App.Port,
+		Addr:         fmt.Sprintf(":%d", cfg.App.Port),
 		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -153,7 +165,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Infof("Server is running on port %s", cfg.App.Port)
+		logger.Infof("Server is running on port %d", cfg.App.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Errorf("Server failed to start: %v", err)
 			os.Exit(1)
@@ -193,6 +205,11 @@ func initDB(cfg *config.Config) (*sql.DB, error) {
 
 	logger.Info("Database connection established")
 	return db, nil
+}
+
+func newRateLimiter(rule config.RateLimitRule, trustedProxies []netip.Prefix) *middleware.IPRateLimiter {
+	return middleware.NewIPRateLimiter(float64(rule.RequestsPerMinute), rule.Burst).
+		WithTrustedProxies(trustedProxies)
 }
 
 func setupRouter(

@@ -1,0 +1,18 @@
+# Everything here stays out of the build context, and therefore out of
+# every image layer. Secrets above all: config and DB password are mounted
+# at runtime, never baked in.
+.git
+.github
+**/.env
+**/.env.*
+**/.config.toml
+**/db_password
+tmp/
+.superpowers/
+docs/
+bruno/
+docker-compose*.yaml
+Caddyfile
+Makefile
+.air.toml
+*.md

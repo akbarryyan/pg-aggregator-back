@@ -19,8 +19,9 @@ keseluruhan sistem (backend + frontend).
 ```
 back/
 ├── cmd/api/              # Entry point (main.go): wiring DI manual + router setup
+├── cmd/configenv/        # Cetak nilai config sebagai `export` untuk script shell
 ├── internal/
-│   ├── config/           # Load & validasi .env
+│   ├── config/           # Load & validasi .config.toml
 │   ├── domain/            # Model + error domain, tanpa dependency ke layer lain
 │   │   ├── payment/        # Payment, status, error
 │   │   ├── paymentlink/    # Payment Link (reusable checkout link)
@@ -35,6 +36,10 @@ back/
 │   │   └── sandbox/         # Adapter mock in-memory
 │   ├── middleware/         # Auth (admin JWT, merchant JWT, API key), rate limiting
 │   └── scheduler/          # Background job periodik in-process
+├── Dockerfile            # image: build / dev (hot reload) / runtime (GHCR)
+├── docker-compose.yaml   # stack produksi (caddy + api + postgres); lokal + override
+├── Caddyfile             # HTTPS api.whuzpay.web.id
+├── DEPLOY.md             # panduan deploy VPS
 ├── migrations/            # SQL migration bernomor urut, dijalankan manual
 ├── seeds/                 # SQL seed data
 ├── bruno/                 # Koleksi Bruno untuk testing manual API (referensi kontrak)
@@ -43,48 +48,45 @@ back/
 
 ## Setup
 
-1. Copy environment file:
-```bash
-cp .env.example .env
-```
+Backend dan PostgreSQL berjalan di Docker — lokal maupun di VPS memakai
+`docker compose up -d`. Di lokal, `docker-compose.override.yaml` (otomatis
+dibaca Compose) memakai image dev dengan source ter-mount dan `air` untuk
+hot reload, API di `http://localhost:8090`.
 
-2. Update `.env` dengan konfigurasi kamu (lihat tabel di bawah)
-
-3. Install dependencies:
 ```bash
-go mod download
-```
-
-4. Jalankan migration:
-```bash
+cp .config.example.toml .config.toml && chmod 600 .config.toml
+printf '%s' postgres > db_password && chmod 644 db_password   # sama dengan db.password
+docker compose up -d
 make migrate
+make seed            # data demo — hanya lokal
+docker compose logs -f api
 ```
 
-5. Seed initial data:
-```bash
-make seed
-```
+Semua key `.config.toml` wajib ada (tanpa default) dan key tak dikenal
+ditolak. Path config lain bisa dipakai lewat flag `-config`.
 
-6. Jalankan server:
-```bash
-make run
-# atau hot reload (butuh air terpasang):
-make dev
-```
-
-Helper database opsional:
-```bash
-make db-create
-```
-
-### Environment Variables Penting
-
-| Var | Keterangan |
+| Perintah | Fungsi |
 |---|---|
-| `APP_URL`, `FRONTEND_URL` | Wajib diisi — `config.Validate()` gagal start kalau kosong |
-| `JWT_SECRET` | Wajib diganti di production (`APP_ENV=production` menolak nilai default) |
-| `CASHI_API_KEY` / `CASHI_SECRET_KEY` | Wajib di production; sandbox merchant tidak butuh ini (mock, tanpa HTTP call) |
-| `DB_*` | Koneksi PostgreSQL |
+| `docker compose up -d` / `down` | start / stop stack |
+| `make migrate` | jalankan migration (container `migrate`) |
+| `make seed` | data demo (ditolak di server) |
+| `make seed-admin` | admin pertama, hanya jika tabel `admins` kosong |
+| `make release VERSION=x.y.z` | build multi-arch + push ke GHCR |
+
+Deploy ke VPS: [DEPLOY.md](DEPLOY.md).
+
+### Config Penting (`.config.toml`)
+
+| Key | Keterangan |
+|---|---|
+| `app.url`, `app.frontend_url` | Wajib diisi — `config.Validate()` gagal start kalau kosong |
+| `security.jwt_secret` | Tidak boleh kosong; wajib diganti di production (`app.environment = "production"` menolak `change-this-secret`) |
+| `cashi.api_key` / `cashi.secret_key` | Wajib di production; sandbox merchant tidak butuh ini (mock, tanpa HTTP call) |
+| `[db]` | Koneksi PostgreSQL (`host = "postgres"`); `password` sama dengan isi `db_password`; script migrate/seed membacanya lewat `configenv` |
+| `[rate_limit]` | Batas request per IP (auth/public/sensitive) dan `trusted_proxies` — CIDR proxy yang `X-Forwarded-For`-nya dipercaya (`[]` lokal, `["10.89.0.2/32"]` di VPS) |
+
+Error config (key hilang, key tidak dikenal, sintaks) hanya menyebut nama
+key dan nomor baris, tidak pernah nilainya, karena file ini berisi secret.
 
 ## Arsitektur & Alur Request
 
@@ -130,6 +132,8 @@ payment-link publik, webhook provider) tidak memakai JWT/API key sama
 sekali, tapi tetap melewati rate limiter per-IP.
 
 Tiga tingkat rate limiter per-IP (`internal/middleware/rate_limit.go`):
+
+Nilai default di bawah diatur di `[rate_limit]` pada `.config.toml`; di belakang Caddy, IP klien diambil dari `X-Forwarded-For` hanya jika koneksi datang dari `trusted_proxies`.
 
 | Limiter | Rate | Dipakai untuk |
 |---|---|---|

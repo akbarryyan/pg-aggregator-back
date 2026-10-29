@@ -1,33 +1,44 @@
 SHELL := /bin/bash
 
-.PHONY: migrate seed db-create run dev
+IMAGE := ghcr.io/akbarryyan/whuzpay-backend
+PLATFORMS := linux/amd64,linux/arm64
 
-db-create:
-	./scripts/db-create.sh
+.PHONY: migrate seed-admin seed release
+
+# Every target goes through docker compose, so the same command works here
+# (docker-compose.override.yaml present: dev image, source mounted) and on
+# the VPS (production image only). Start the stack with `docker compose up -d`.
 
 migrate:
-	./scripts/migrate.sh
+	docker compose run --rm migrate
 
+# First admin on a fresh database only (refuses once any admin exists).
+seed-admin:
+	docker compose run --rm migrate scripts/seed-admin.sh
+
+# Demo data (50 fake merchants, publicly documented credentials) must never
+# reach production; the override file only exists in the local checkout.
 seed:
-	./scripts/seed.sh
-
-run:
-	go run ./cmd/api
-
-# Hot reload: auto rebuild + restart on Go file changes
-# Prefer air on PATH; fall back to $(go env GOPATH)/bin/air (common after go install)
-dev:
-	@AIR_BIN=$$(command -v air 2>/dev/null || true); \
-	if [ -z "$$AIR_BIN" ]; then \
-		GOBIN_DIR="$$(go env GOBIN)"; \
-		if [ -z "$$GOBIN_DIR" ]; then GOBIN_DIR="$$(go env GOPATH)/bin"; fi; \
-		if [ -x "$$GOBIN_DIR/air" ]; then AIR_BIN="$$GOBIN_DIR/air"; fi; \
-	fi; \
-	if [ -z "$$AIR_BIN" ]; then \
-		echo "air not found. Install once with:"; \
-		echo "  go install github.com/air-verse/air@latest"; \
-		echo "Then ensure \$$(go env GOPATH)/bin is on PATH."; \
+	@if [ ! -f docker-compose.override.yaml ]; then \
+		echo "make seed is local-only (demo data). On the server use: make seed-admin" >&2; \
 		exit 1; \
-	fi; \
-	exec "$$AIR_BIN"
+	fi
+	docker compose run --rm migrate scripts/seed.sh
 
+# Multi-arch build + push to GHCR (requires `docker login ghcr.io` and an
+# arm64-capable buildx builder — see DEPLOY.md).
+release:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "usage: make release VERSION=x.y.z" >&2; \
+		exit 1; \
+	fi
+	@if ! [[ "$(VERSION)" =~ ^[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then \
+		echo "VERSION must be x.y.z (got: $(VERSION))" >&2; \
+		exit 1; \
+	fi
+	@if docker buildx imagetools inspect $(IMAGE):$(VERSION) >/dev/null 2>&1; then \
+		echo "$(IMAGE):$(VERSION) already exists — tags are never overwritten; bump VERSION" >&2; \
+		exit 1; \
+	fi
+	docker buildx build --platform $(PLATFORMS) --build-arg VERSION=$(VERSION) \
+		-t $(IMAGE):$(VERSION) --push .

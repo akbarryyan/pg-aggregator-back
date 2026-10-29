@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -19,6 +20,14 @@ func doLimited(l *IPRateLimiter, remoteAddr string) int {
 		w.WriteHeader(http.StatusOK)
 	}))
 	handler.ServeHTTP(rec, newTestRequest(remoteAddr))
+	return rec.Code
+}
+
+func doLimitedReq(l *IPRateLimiter, req *http.Request) int {
+	rec := httptest.NewRecorder()
+	l.Limit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rec, req)
 	return rec.Code
 }
 
@@ -130,6 +139,7 @@ func TestIPRateLimiter_CleanupKeepsRecentBuckets(t *testing.T) {
 }
 
 func TestClientIP(t *testing.T) {
+	l := NewIPRateLimiter(60, 1)
 	cases := map[string]string{
 		"1.2.3.4:5678":    "1.2.3.4",
 		"[::1]:5678":      "::1",
@@ -137,8 +147,74 @@ func TestClientIP(t *testing.T) {
 	}
 	for remoteAddr, want := range cases {
 		req := newTestRequest(remoteAddr)
-		if got := clientIP(req); got != want {
+		if got := l.clientIP(req); got != want {
 			t.Errorf("clientIP(%q) = %q, want %q", remoteAddr, got, want)
 		}
+	}
+}
+
+func TestClientIP_TrustedProxies(t *testing.T) {
+	trusted := []netip.Prefix{
+		netip.MustParsePrefix("10.89.0.2/32"),
+		netip.MustParsePrefix("fd00::/8"),
+	}
+	tests := []struct {
+		name       string
+		noTrust    bool // limiter without WithTrustedProxies
+		remoteAddr string
+		xff        []string // one element per X-Forwarded-For header line
+		want       string
+	}{
+		{"no trusted proxies configured ignores XFF", true, "10.89.0.2:4000", []string{"203.0.113.7"}, "10.89.0.2"},
+		{"trusted proxy reports client", false, "10.89.0.2:4000", []string{"203.0.113.7"}, "203.0.113.7"},
+		{"spoofed XFF from untrusted peer is ignored", false, "198.51.100.9:4000", []string{"1.2.3.4"}, "198.51.100.9"},
+		{"client-forged left entries are ignored", false, "10.89.0.2:4000", []string{"1.2.3.4, 203.0.113.7"}, "203.0.113.7"},
+		{"multiple header lines are joined in order", false, "10.89.0.2:4000", []string{"1.2.3.4", "203.0.113.7"}, "203.0.113.7"},
+		{"trusted hops on the right are skipped", false, "10.89.0.2:4000", []string{"203.0.113.7, 10.89.0.2"}, "203.0.113.7"},
+		{"no header from trusted proxy falls back to peer", false, "10.89.0.2:4000", nil, "10.89.0.2"},
+		{"unparseable entry falls back to peer", false, "10.89.0.2:4000", []string{"203.0.113.7, garbage"}, "10.89.0.2"},
+		{"all entries trusted falls back to peer", false, "10.89.0.2:4000", []string{"10.89.0.2"}, "10.89.0.2"},
+		{"IPv6 trusted proxy", false, "[fd00::5]:4000", []string{"2001:db8::1"}, "2001:db8::1"},
+		{"IPv4-mapped client is unmapped", false, "10.89.0.2:4000", []string{"::ffff:203.0.113.7"}, "203.0.113.7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := NewIPRateLimiter(60, 1)
+			if !tt.noTrust {
+				l = l.WithTrustedProxies(trusted)
+			}
+			req := newTestRequest(tt.remoteAddr)
+			for _, v := range tt.xff {
+				req.Header.Add("X-Forwarded-For", v)
+			}
+			if got := l.clientIP(req); got != tt.want {
+				t.Errorf("clientIP = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The bug this feature fixes: behind Caddy every request arrives from the
+// proxy's address, so without trusted proxies all visitors would share one
+// bucket (e.g. one 5/min login budget for everyone).
+func TestIPRateLimiter_SeparateBucketsBehindTrustedProxy(t *testing.T) {
+	l := NewIPRateLimiter(60, 1).WithTrustedProxies([]netip.Prefix{netip.MustParsePrefix("10.89.0.2/32")})
+	fixed := time.Now()
+	l.now = func() time.Time { return fixed }
+
+	viaProxy := func(client string) *http.Request {
+		req := newTestRequest("10.89.0.2:4000")
+		req.Header.Set("X-Forwarded-For", client)
+		return req
+	}
+
+	if code := doLimitedReq(l, viaProxy("203.0.113.7")); code != http.StatusOK {
+		t.Fatalf("client A first request: got %d, want 200", code)
+	}
+	if code := doLimitedReq(l, viaProxy("203.0.113.7")); code != http.StatusTooManyRequests {
+		t.Fatalf("client A second request: got %d, want 429", code)
+	}
+	if code := doLimitedReq(l, viaProxy("198.51.100.9")); code != http.StatusOK {
+		t.Fatalf("client B must have its own bucket: got %d, want 200", code)
 	}
 }

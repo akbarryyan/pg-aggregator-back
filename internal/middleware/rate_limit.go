@@ -3,6 +3,8 @@ package middleware
 import (
 	"net"
 	"net/http"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -12,11 +14,12 @@ import (
 // for a check this simple — consistent with keeping background jobs
 // dependency-free too (see internal/scheduler).
 type IPRateLimiter struct {
-	mu         sync.Mutex
-	buckets    map[string]*tokenBucket
-	maxTokens  float64
-	refillRate float64 // tokens per second
-	now        func() time.Time
+	mu             sync.Mutex
+	buckets        map[string]*tokenBucket
+	maxTokens      float64
+	refillRate     float64 // tokens per second
+	trustedProxies []netip.Prefix
+	now            func() time.Time
 }
 
 type tokenBucket struct {
@@ -33,6 +36,16 @@ func NewIPRateLimiter(requestsPerMinute float64, burst int) *IPRateLimiter {
 		refillRate: requestsPerMinute / 60,
 		now:        time.Now,
 	}
+}
+
+// WithTrustedProxies makes the limiter key requests by the client IP that a
+// trusted reverse proxy (e.g. Caddy) reports in X-Forwarded-For, instead of
+// the proxy's own address — otherwise every visitor behind the proxy would
+// share one bucket. Without it (or with an empty list) only the TCP peer
+// address is used.
+func (l *IPRateLimiter) WithTrustedProxies(prefixes []netip.Prefix) *IPRateLimiter {
+	l.trustedProxies = prefixes
+	return l
 }
 
 func (l *IPRateLimiter) allow(ip string) bool {
@@ -80,7 +93,7 @@ func (l *IPRateLimiter) Cleanup(idleAfter time.Duration) {
 // responding 429 once exhausted.
 func (l *IPRateLimiter) Limit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !l.allow(clientIP(r)) {
+		if !l.allow(l.clientIP(r)) {
 			writeJSONError(w, http.StatusTooManyRequests, "Too many requests, please try again later")
 			return
 		}
@@ -88,15 +101,46 @@ func (l *IPRateLimiter) Limit(next http.Handler) http.Handler {
 	})
 }
 
-// clientIP uses the direct TCP peer address only. Headers like
-// X-Forwarded-For are attacker-controlled unless a trusted reverse proxy
-// strips/overwrites them first, and this API has no such trust boundary
-// configured — honoring them here would let a client bypass the limit by
-// sending a different value on every request.
-func clientIP(r *http.Request) string {
+// clientIP returns the key a request is limited under. The TCP peer address
+// is authoritative unless the peer is a configured trusted proxy: only then
+// is X-Forwarded-For consulted, walked right to left, and the first address
+// that isn't itself a trusted proxy is the client. Entries further left were
+// supplied by the client and could be forged, so they are never used. Any
+// doubt (no header, an unparseable entry, every entry trusted) falls back to
+// the peer address.
+func (l *IPRateLimiter) clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil || !l.isTrustedProxy(peer) {
+		return host
+	}
+
+	var entries []string
+	for _, v := range r.Header.Values("X-Forwarded-For") {
+		entries = append(entries, strings.Split(v, ",")...)
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		addr, err := netip.ParseAddr(strings.TrimSpace(entries[i]))
+		if err != nil {
+			return host
+		}
+		addr = addr.Unmap()
+		if !l.isTrustedProxy(addr) {
+			return addr.String()
+		}
 	}
 	return host
+}
+
+func (l *IPRateLimiter) isTrustedProxy(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	for _, p := range l.trustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }

@@ -1,0 +1,111 @@
+# Production stack (VPS). Locally, docker-compose.override.yaml is merged in
+# automatically and swaps api/migrate to the hot-reload dev image.
+#
+# New release: change the tag on the next line to the pushed version, then
+# `docker compose up -d` (plus `make migrate` if the release adds
+# migrations). api and migrate share this one tag.
+x-api-image: &api-image ghcr.io/akbarryyan/whuzpay-backend:1.0.0
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      whuzpay:
+        # Fixed so .config.toml can trust exactly this address:
+        # [rate_limit] trusted_proxies = ["10.89.0.2/32"]
+        ipv4_address: 10.89.0.2
+    depends_on:
+      - api
+    mem_limit: 128m
+    logging: *logging
+
+  api:
+    image: *api-image
+    restart: unless-stopped
+    volumes:
+      - ./.config.toml:/app/.config.toml:ro
+    networks:
+      - whuzpay
+    environment:
+      # Go doesn't derive a heap target from the cgroup limit; keep the GC
+      # working below mem_limit instead of being OOM-killed at 192m.
+      GOMEMLIMIT: 160MiB
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 192m
+    logging: *logging
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      # Must match db.user / db.name in .config.toml. The password comes from
+      # the db_password secret (must match db.password) and is only read when
+      # the pgdata volume is first initialised.
+      POSTGRES_USER: postgres
+      POSTGRES_DB: pg_aggregator
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - pgdata:/var/lib/postgresql
+    networks:
+      - whuzpay
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pg_aggregator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 384m
+    logging: *logging
+
+  # One-shot for `make migrate` / `make seed-admin` (docker compose run --rm
+  # migrate ...). The "tools" profile keeps it out of `docker compose up`.
+  migrate:
+    image: *api-image
+    profiles: ["tools"]
+    entrypoint: ["bash"]
+    command: ["scripts/migrate.sh"]
+    volumes:
+      - ./.config.toml:/app/.config.toml:ro
+    networks:
+      - whuzpay
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+secrets:
+  db_password:
+    file: ./db_password
+
+networks:
+  whuzpay:
+    ipam:
+      config:
+        # Outside the AWS default VPC range (172.31.0.0/16) and Docker's
+        # default 172.x address pools.
+        - subnet: 10.89.0.0/24
+          # Dynamic addresses come only from .128–.254, keeping the fixed
+          # 10.89.0.2 free for Caddy; without this postgres (started first)
+          # takes .2 and Caddy fails with "Address already in use".
+          ip_range: 10.89.0.128/25
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

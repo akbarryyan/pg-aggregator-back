@@ -1,0 +1,15 @@
+# HTTPS for the API: Caddy obtains and renews the Let's Encrypt certificate
+# automatically (DNS A record api.whuzpay.web.id must point at the VPS and
+# ports 80/443 must be open). It replaces any client-sent X-Forwarded-For
+# with the real peer address before proxying, which the API trusts via
+# [rate_limit] trusted_proxies.
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+api.whuzpay.web.id {
+	encode zstd gzip
+	reverse_proxy api:8080
+}

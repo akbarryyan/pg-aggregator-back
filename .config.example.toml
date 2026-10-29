@@ -1,0 +1,52 @@
+# Backend config. Copy to .config.toml (gitignored) and fill in values:
+#   cp .config.example.toml .config.toml && chmod 600 .config.toml
+# The values below fit local Docker (`docker compose up -d`). For the VPS
+# see DEPLOY.md. Every key is required — there are no defaults — and unknown
+# keys are rejected, so a typo fails startup instead of being ignored.
+# An empty string ("") is allowed unless noted otherwise.
+
+[app]
+name         = "pg-aggregator"           # must not be empty
+environment  = "development"             # development | production
+port         = 8080                      # inside the container; published as localhost:8090 locally
+url          = "http://localhost:8090"   # must not be empty
+frontend_url = "http://localhost:3000"   # must not be empty; also the CORS origin
+
+[db]
+host     = "postgres"                    # compose service name; must not be empty
+port     = 5432
+user     = "postgres"                    # must match POSTGRES_USER in docker-compose.yaml
+password = "postgres"                    # must equal the contents of ./db_password
+name     = "pg_aggregator"               # must match POSTGRES_DB; must not be empty
+sslmode  = "disable"                     # traffic stays on the compose network
+
+[redis]  # not used yet; kept so the config fields stay unchanged
+host     = "localhost"
+port     = 6379
+password = ""
+
+[cashi]  # real QRIS provider, used only for environment=production payments
+base_url   = "https://cashi.id"
+api_key    = ""                          # x-api-key header; required when app.environment = "production"
+secret_key = ""                          # webhook HMAC secret; required when app.environment = "production"
+
+[security]
+jwt_secret = "change-this-secret"        # must not be empty; must be changed in production
+
+[rate_limit]  # per-client-IP token buckets (internal/middleware/rate_limit.go)
+# CIDRs of reverse proxies whose X-Forwarded-For header names the client IP.
+# Must be CIDRs ("10.89.0.2/32", not "10.89.0.2"). Empty = never trust the
+# header (use the TCP peer). On the VPS: ["10.89.0.2/32"] (Caddy).
+trusted_proxies = []
+
+[rate_limit.auth]       # login & register — brute-force target
+requests_per_minute = 5  # must be > 0
+burst               = 5  # must be >= 1
+
+[rate_limit.public]     # checkout, payment links, provider webhooks, merchant API key
+requests_per_minute = 120
+burst               = 30
+
+[rate_limit.sensitive]  # change-password, API key create/rotate/revoke, webhook secret rotation
+requests_per_minute = 10
+burst               = 5

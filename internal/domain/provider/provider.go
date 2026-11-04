@@ -11,6 +11,7 @@ const (
 	ProviderMidtrans = "midtrans"
 	ProviderXendit   = "xendit"
 	ProviderDuitku   = "duitku"
+	ProviderSandbox  = "sandbox"
 )
 
 const (
@@ -60,6 +61,9 @@ type NormalizedPaymentStatus struct {
 	Status            string
 	ProviderReference string
 	PaidAt            *time.Time
+	// Amount is the gross amount the provider reports for the payment
+	// (what the customer paid, before any provider fee); nil if unknown.
+	Amount *int64
 }
 
 type ProviderConfig struct {

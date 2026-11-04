@@ -117,9 +117,11 @@ func (a *CashiAdapter) GetPaymentStatus(ctx context.Context, providerReference s
 		return nil, &CashiError{StatusCode: 400, Message: checkResp.Message}
 	}
 
+	amount := checkResp.Amount
 	return &provider.NormalizedPaymentStatus{
 		Status:            a.NormalizeStatus(checkResp.Status),
 		ProviderReference: checkResp.OrderID,
+		Amount:            &amount,
 	}, nil
 }
 
@@ -152,8 +154,7 @@ func (a *CashiAdapter) ParseWebhook(rawPayload []byte) (*provider.ProviderWebhoo
 	var paidAt *time.Time
 	if webhook.Event == EventPaymentSettled && webhook.Data.Status == StatusSettled {
 		status = "paid"
-		now := time.Now()
-		paidAt = &now
+		paidAt = settledAt(webhook.Data.Timestamp)
 	}
 
 	return &provider.ProviderWebhookPayload{
@@ -164,6 +165,17 @@ func (a *CashiAdapter) ParseWebhook(rawPayload []byte) (*provider.ProviderWebhoo
 		Amount:            webhook.Data.Amount,
 		RawPayload:        rawMap,
 	}, nil
+}
+
+// settledAt prefers Cashi's own settlement timestamp (RFC3339, e.g.
+// "2025-12-25T19:46:40Z") so paid_at reflects when the customer paid, not
+// when the webhook happened to arrive; it falls back to receipt time.
+func settledAt(ts string) *time.Time {
+	if t, err := time.Parse(time.RFC3339, ts); err == nil {
+		return &t
+	}
+	now := time.Now()
+	return &now
 }
 
 func (a *CashiAdapter) NormalizeStatus(providerStatus string) string {

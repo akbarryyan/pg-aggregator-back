@@ -2,60 +2,64 @@ package repository
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/google/uuid"
 )
 
-func (r *PaymentRepository) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) error {
-	p, err := r.GetByID(ctx, id)
-	if err != nil {
-		return err
+// UpdateStatus moves a payment to newStatus in one guarded statement and
+// returns the status it had just before. The WHERE clause only matches the
+// statuses newStatus may come from (payment.AllowedSourceStatuses), so of
+// several concurrent callers — webhook, reconcile, expire job — exactly one
+// wins and the rest match no row; only the winner should notify the
+// merchant. Under READ COMMITTED a concurrent caller blocks on the
+// subquery's row lock; once the winner commits it re-checks the guard
+// against the new row version and matches nothing. prev.status is the status
+// just before this update (e.g. to recognise a late expired → paid
+// settlement). A CTE + RETURNING (SELECT ... FROM prev) is not used because
+// PostgreSQL evaluates it after the row changed and yields NULL.
+func (r *PaymentRepository) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) (string, error) {
+	from := payment.AllowedSourceStatuses(newStatus)
+	if len(from) == 0 {
+		return "", payment.ErrInvalidStatusTransition
 	}
 
-	if !payment.CanTransitionTo(p.Status, newStatus) {
-		return payment.ErrInvalidStatusTransition
+	args := []interface{}{newStatus, paidAt, time.Now(), id}
+	placeholders := make([]string, len(from))
+	for i, s := range from {
+		args = append(args, s)
+		placeholders[i] = fmt.Sprintf("$%d", len(args))
 	}
 
 	query := `
-		UPDATE payments
-		SET status = $1, paid_at = $2, updated_at = $3
-		WHERE id = $4
+		UPDATE payments p SET status = $1, paid_at = $2, updated_at = $3
+		FROM (SELECT id, status FROM payments WHERE id = $4 FOR UPDATE) prev
+		WHERE p.id = prev.id AND p.status IN (` + strings.Join(placeholders, ", ") + `)
+		RETURNING prev.status
 	`
 
-	_, err = r.db.ExecContext(ctx, query, newStatus, paidAt, time.Now(), id)
-	if err != nil {
-		return fmt.Errorf("failed to update payment status: %w", err)
+	var previous string
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&previous)
+	if err == nil {
+		return previous, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("failed to update payment status: %w", err)
 	}
 
-	return nil
-}
-
-func (r *PaymentRepository) Update(ctx context.Context, p *payment.Payment) error {
-	p.UpdatedAt = time.Now()
-
-	query := `
-		UPDATE payments
-		SET 
-			status = $1,
-			provider_reference = $2,
-			qris_data = $3,
-			paid_at = $4,
-			updated_at = $5
-		WHERE id = $6
-	`
-
-	_, err := r.db.ExecContext(ctx, query,
-		p.Status, p.ProviderReference, p.QRISData, p.PaidAt, p.UpdatedAt, p.ID,
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to update payment: %w", err)
+	current, getErr := r.GetByID(ctx, id)
+	if getErr != nil {
+		return "", getErr
 	}
-
-	return nil
+	if payment.IsTerminalStatus(current.Status) {
+		return "", payment.ErrPaymentAlreadyTerminal
+	}
+	return "", payment.ErrInvalidStatusTransition
 }
 
 func (r *PaymentRepository) UpdateProviderReference(ctx context.Context, id uuid.UUID, providerReference string) error {

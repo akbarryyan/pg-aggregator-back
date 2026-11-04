@@ -1,6 +1,7 @@
 package paymentlink
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -167,6 +168,18 @@ func TestCreatePaymentLinkRequest_Validate(t *testing.T) {
 			t.Errorf("expected environment normalized to sandbox, got %q", req.Environment)
 		}
 	})
+}
+
+func TestPaymentLinkRequest_ValidateEnvironment(t *testing.T) {
+	req := validFixedRequest()
+	if err := req.Validate(); err != nil || req.Environment != payment.EnvironmentSandbox {
+		t.Fatalf("empty environment: Validate() = %v, env %q; want nil, sandbox", err, req.Environment)
+	}
+	req = validFixedRequest()
+	req.Environment = "nope"
+	if err := req.Validate(); !errors.Is(err, payment.ErrInvalidEnvironment) {
+		t.Fatalf("unknown environment: Validate() = %v, want payment.ErrInvalidEnvironment", err)
+	}
 }
 
 func TestPaymentLink_IsAvailable(t *testing.T) {

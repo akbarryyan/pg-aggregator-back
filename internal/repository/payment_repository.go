@@ -152,6 +152,69 @@ func (r *PaymentRepository) ListExpiredPending(ctx context.Context, before time.
 		}
 		payments = append(payments, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list expired pending payments: %w", err)
+	}
+	return payments, nil
+}
+
+// ListReconcileCandidates returns production payments the reconcile job
+// should re-check with their provider: pending ones created within
+// pendingWindow, and expired ones whose deadline passed within expiredWindow
+// (a late settlement may still arrive). Payments already flagged with a
+// provider-side amount mismatch are left to a human — re-checking them every
+// run would only repeat the flag. The LIKE deliberately does not match a
+// webhook-only mismatch ("webhook_amount_mismatch:"), which reconcile may
+// still settle from check-status.
+//
+// Order is (created_at DESC, id DESC), a total order, so after (when non-nil)
+// can page through it: only rows strictly after the cursor are returned. This
+// lets the reconcile job rotate through a window larger than one batch.
+func (r *PaymentRepository) ListReconcileCandidates(ctx context.Context, now time.Time, pendingWindow, expiredWindow time.Duration, limit int, after *payment.ReconcileCursor) ([]*payment.Payment, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	args := []interface{}{
+		payment.EnvironmentProduction,
+		payment.StatusPending, now.Add(-pendingWindow),
+		payment.StatusExpired, now.Add(-expiredWindow),
+		limit,
+	}
+	keyset := ""
+	if after != nil {
+		keyset = "AND (p.created_at, p.id) < ($7, $8)"
+		args = append(args, after.CreatedAt, after.ID)
+	}
+	query := `SELECT ` + paymentSelectCols + `
+		FROM payments p
+		WHERE p.environment = $1
+		  AND COALESCE(p.provider_reference, '') <> ''
+		  AND ((p.status = $2 AND p.created_at >= $3) OR (p.status = $4 AND p.expires_at >= $5))
+		  AND NOT EXISTS (
+		      SELECT 1 FROM webhook_events w
+		      WHERE w.payment_id = p.id AND w.processing_error LIKE 'amount_mismatch%'
+		  )
+		  ` + keyset + `
+		ORDER BY p.created_at DESC, p.id DESC
+		LIMIT $6
+	`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list reconcile candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var payments []*payment.Payment
+	for rows.Next() {
+		p := &payment.Payment{}
+		if err := scanPayment(rows, p); err != nil {
+			return nil, fmt.Errorf("failed to scan payment: %w", err)
+		}
+		payments = append(payments, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list reconcile candidates: %w", err)
+	}
 	return payments, nil
 }
 

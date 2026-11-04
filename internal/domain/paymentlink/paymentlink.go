@@ -125,7 +125,11 @@ func (r *CreatePaymentLinkRequest) Validate() error {
 		return ErrMerchantIDRequired
 	}
 
-	r.Environment = payment.NormalizeEnvironment(r.Environment)
+	env, err := payment.ParseEnvironment(r.Environment)
+	if err != nil {
+		return err
+	}
+	r.Environment = env
 
 	return nil
 }

@@ -59,9 +59,10 @@ type WebhookPayload struct {
 }
 
 type WebhookEventData struct {
-	OrderID string `json:"order_id"`
-	Status  string `json:"status"`
-	Amount  *int64 `json:"amount,omitempty"`
+	OrderID   string `json:"order_id"`
+	Status    string `json:"status"`
+	Amount    *int64 `json:"amount,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 type CashiError struct {

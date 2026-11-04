@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -151,6 +152,9 @@ func TestMarkPaid(t *testing.T) {
 	if status.Status != "paid" {
 		t.Errorf("expected paid after MarkPaid, got %q", status.Status)
 	}
+	if status.Amount == nil || *status.Amount != resp.Amount {
+		t.Errorf("expected amount %d, got %v", resp.Amount, status.Amount)
+	}
 
 	if a.MarkPaid("does-not-exist") {
 		t.Errorf("expected MarkPaid to fail for unknown reference")
@@ -184,4 +188,37 @@ func TestSandboxNormalizeStatus(t *testing.T) {
 	if got := a.NormalizeStatus("whatever"); got != "pending" {
 		t.Errorf("NormalizeStatus(whatever) = %q, want pending", got)
 	}
+}
+
+// GetPaymentStatus must read order fields under the lock: MarkPaid writes
+// them concurrently. Meaningful under -race.
+func TestGetPaymentStatus_ConcurrentWithMarkPaid(t *testing.T) {
+	a := NewAdapter()
+	resp, err := a.CreatePayment(context.Background(), &provider.ProviderPaymentRequest{
+		InternalReference: "REF-RACE",
+		Amount:            15000,
+		ExpiresAt:         time.Now().Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			a.MarkPaid(resp.ProviderReference)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := a.GetPaymentStatus(context.Background(), resp.ProviderReference); err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

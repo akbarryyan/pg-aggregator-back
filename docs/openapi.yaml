@@ -552,7 +552,7 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/Limit' }
         - { $ref: '#/components/parameters/Offset' }
-        - { name: status, in: query, schema: { type: string, enum: [pending, success, failed] } }
+        - { name: status, in: query, schema: { type: string, enum: [pending, sending, success, failed, skipped] } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedCallbacks' } } } }
 
@@ -560,6 +560,12 @@ paths:
     post:
       tags: [Admin - Callbacks]
       summary: Manually retry one failed callback delivery
+      description: |
+        Sends synchronously as a new attempt row. The destination is the payment's
+        current `callback_url`, else the merchant's current `webhook_url`; the
+        delivery's stored URL is used only when the payment is gone or neither is
+        set. The URL is validated again, so a URL that is still invalid fails the
+        new attempt without being contacted.
       security: [{ adminBearer: [] }]
       parameters: [{ $ref: '#/components/parameters/PathID' }]
       responses:
@@ -759,6 +765,7 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/UpdateMerchantRequest' } } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /merchant/webhook-secret:
     get:
@@ -943,19 +950,25 @@ paths:
       tags: [Webhooks]
       summary: Inbound webhook from a payment provider (e.g. Cashi)
       description: |
-        No auth — signature-verified downstream per provider adapter
-        (`x-gateway-signature` header, HMAC). Rate limited 120 req/min per
-        IP to blunt flooding. Duplicate or already-terminal-payment
-        webhooks respond 200 `{"status":"ignored"}` rather than an error,
-        since providers retry on non-2xx (see
-        docs/payment-state-machine.md).
+        No auth — signature-verified per provider adapter (`x-gateway-signature`,
+        HMAC-SHA256 of the raw body). A webhook only triggers processing: the
+        payment is marked paid after the provider's check-status confirms it is
+        settled and its gross amount equals the stored amount (see
+        docs/payment-state-machine.md). Duplicates, non-settlement events,
+        already-final payments and amount mismatches respond 200
+        `{"status":"ignored"}`; if the provider cannot confirm the settlement
+        yet the response is 502 so the provider may retry (the reconcile job
+        is the fallback). A webhook for a payment owned by a different
+        provider than the one in the path is rejected with 400 before any
+        check-status call. Rate limited 120 req/min per IP.
       parameters: [{ name: providerName, in: path, required: true, schema: { type: string } }]
       requestBody:
         content: { application/json: { schema: { type: object } } }
       responses:
-        '200': { description: Processed or ignored (duplicate/terminal) }
-        '400': { description: Invalid payload / signature validation failed / unregistered provider }
+        '200': { description: Processed, or acknowledged without a status change (ignored) }
+        '400': { description: Invalid payload / signature validation failed / unregistered provider / unknown order / provider does not own the payment }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+        '502': { description: Settlement not yet confirmed by the provider — retry later }
 
   # ---------------------------------------------------------------- Health
   /health:
@@ -1107,9 +1120,24 @@ components:
         description: { type: string }
         customer_name: { type: string, nullable: true }
         customer_email: { type: string, nullable: true }
-        callback_url: { type: string, nullable: true }
+        callback_url:
+          type: string
+          nullable: true
+          description: |
+            URL notified when the payment changes status. Must have a public host:
+            `localhost`, private, loopback, link-local or cloud-metadata addresses and
+            embedded credentials (`user:password@`) are rejected with 400 in every
+            environment. Production payments require `https`; sandbox payments also
+            allow plain `http` (sandbox relaxes only the scheme, not the host rules).
+            Only this per-payment URL may be plain `http` (sandbox); the merchant
+            `webhook_url` is always `https`. Our own API and frontend domains
+            (and their subdomains) are rejected too.
+            The destination address is checked again when the callback is sent.
+            Redirects (3xx) are not followed and count as a failed delivery, so
+            register the final URL. Delivery is at-least-once: the same callback can
+            arrive more than once, so de-duplicate on (`payment_id`, `event`).
         expires_in_minutes: { type: integer, minimum: 1, maximum: 1440, default: 30 }
-        environment: { type: string, enum: [sandbox, production] }
+        environment: { type: string, example: sandbox, description: 'sandbox | production (aliases: prod, live / test, dev, development). Empty means sandbox; any other value is rejected with 400.' }
         use_custom_merchant_name:
           type: boolean
           description: Requests a custom merchant display name on the QR (provider-dependent, e.g. Cashi QRIS Custom).
@@ -1193,7 +1221,12 @@ components:
         provider_status: { type: string, nullable: true }
         action: { type: string, enum: [updated, unchanged, expired_local, skipped, error] }
         message: { type: string }
-        merchant_notified: { type: boolean }
+        merchant_notified:
+          type: boolean
+          description: |
+            True when a merchant callback was queued for this change (a delivery row
+            was recorded). It does not mean the merchant has received it yet: the
+            delivery worker sends it shortly after.
 
     # ---- Merchant ----
     CreateMerchantRequest:
@@ -1204,14 +1237,36 @@ components:
         email: { type: string, format: email }
         phone: { type: string }
         business_name: { type: string }
-        webhook_url: { type: string, nullable: true }
+        webhook_url:
+          type: string
+          nullable: true
+          description: |
+            URL that receives payment callbacks. Always `https` (in every environment), with a public host;
+            our own API and frontend domains (and their subdomains) are rejected too:
+            `http`, embedded credentials (`user:password@`), `localhost`, and private,
+            loopback, link-local or cloud-metadata addresses are rejected with 400.
+            The destination address is checked again when a callback is sent.
+            Redirects (3xx) are not followed and count as a failed delivery, so
+            register the final URL. Delivery is at-least-once: the same callback can
+            arrive more than once, so de-duplicate on (`payment_id`, `event`).
     UpdateMerchantRequest:
       type: object
       properties:
         name: { type: string, nullable: true }
         phone: { type: string, nullable: true }
         business_name: { type: string, nullable: true }
-        webhook_url: { type: string, nullable: true }
+        webhook_url:
+          type: string
+          nullable: true
+          description: |
+            URL that receives payment callbacks. Always `https` (in every environment), with a public host;
+            our own API and frontend domains (and their subdomains) are rejected too:
+            `http`, embedded credentials (`user:password@`), `localhost`, and private,
+            loopback, link-local or cloud-metadata addresses are rejected with 400.
+            The destination address is checked again when a callback is sent.
+            Redirects (3xx) are not followed and count as a failed delivery, so
+            register the final URL. Delivery is at-least-once: the same callback can
+            arrive more than once, so de-duplicate on (`payment_id`, `event`).
     MerchantResponse:
       type: object
       properties:
@@ -1453,7 +1508,13 @@ components:
         target_url: { type: string }
         request_payload: { type: object }
         attempt_number: { type: integer }
-        status: { type: string, enum: [pending, success, failed] }
+        status:
+          type: string
+          enum: [pending, sending, success, failed, skipped]
+          description: |
+            `pending` queued, `sending` claimed by the delivery worker (or a manual
+            retry in flight), `success`/`failed` final for this attempt (a failed one
+            may have `next_retry_at`), `skipped` set only by an operator cleanup.
         http_status: { type: integer, nullable: true }
         response_body: { type: string, nullable: true }
         error_message: { type: string, nullable: true }
@@ -1483,7 +1544,7 @@ components:
         min_amount: { type: integer, nullable: true }
         max_amount: { type: integer, nullable: true }
         expires_at: { type: string, format: date-time, nullable: true }
-        environment: { type: string, enum: [sandbox, production] }
+        environment: { type: string, example: sandbox, description: 'sandbox | production (aliases: prod, live / test, dev, development). Empty means sandbox; any other value is rejected with 400.' }
     UpdatePaymentLinkRequest:
       type: object
       description: amount_type/amount are immutable and not editable here.

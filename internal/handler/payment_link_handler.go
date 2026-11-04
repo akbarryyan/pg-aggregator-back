@@ -288,7 +288,8 @@ func respondPaymentLinkValidationError(w http.ResponseWriter, r *http.Request, e
 		paymentlink.ErrInvalidAmountBounds,
 		paymentlink.ErrAmountOutOfPlatformBounds,
 		paymentlink.ErrMerchantIDRequired,
-		payment.ErrUnsupportedCurrency:
+		payment.ErrUnsupportedCurrency,
+		payment.ErrInvalidEnvironment:
 		respondError(w, http.StatusBadRequest, err.Error())
 	default:
 		logger.ErrorfCtx(r.Context(), "Payment link operation failed: %v", err)

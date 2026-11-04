@@ -118,6 +118,30 @@ func TestParseWebhook(t *testing.T) {
 		}
 	})
 
+	t.Run("settlement timestamp becomes PaidAt", func(t *testing.T) {
+		payload := []byte(`{"event":"PAYMENT_SETTLED","data":{"order_id":"INV-3","status":"SETTLED","amount":2000,"timestamp":"2025-12-25T19:46:40Z"}}`)
+		got, err := adapter.ParseWebhook(payload)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := time.Date(2025, 12, 25, 19, 46, 40, 0, time.UTC)
+		if got.PaidAt == nil || !got.PaidAt.Equal(want) {
+			t.Errorf("PaidAt = %v, want %v", got.PaidAt, want)
+		}
+	})
+
+	t.Run("invalid timestamp falls back to receipt time", func(t *testing.T) {
+		before := time.Now()
+		payload := []byte(`{"event":"PAYMENT_SETTLED","data":{"order_id":"INV-4","status":"SETTLED","timestamp":"yesterday"}}`)
+		got, err := adapter.ParseWebhook(payload)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.PaidAt == nil || got.PaidAt.Before(before) {
+			t.Errorf("expected PaidAt to fall back to now, got %v", got.PaidAt)
+		}
+	})
+
 	t.Run("TEST- prefixed order is ignored as test event", func(t *testing.T) {
 		payload := []byte(`{"event":"PAYMENT_SETTLED","data":{"order_id":"TEST-123","status":"SETTLED"}}`)
 		_, err := adapter.ParseWebhook(payload)
@@ -378,6 +402,9 @@ func TestGetPaymentStatus(t *testing.T) {
 		}
 		if status.Status != "paid" {
 			t.Errorf("expected normalized status paid, got %q", status.Status)
+		}
+		if status.Amount == nil || *status.Amount != 50078 {
+			t.Errorf("expected amount 50078, got %v", status.Amount)
 		}
 	})
 

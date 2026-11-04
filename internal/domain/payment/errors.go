@@ -20,4 +20,18 @@ var (
 	ErrWebhookValidationFailed  = errors.New("webhook validation failed")
 	ErrDuplicateWebhook         = errors.New("duplicate webhook event")
 	ErrInvalidProviderReference = errors.New("invalid provider reference")
+	ErrInvalidEnvironment       = errors.New("invalid environment: use sandbox or production")
+	ErrProviderMismatch         = errors.New("webhook provider does not own this payment")
+
+	// ErrAmountMismatch's text is the "amount_mismatch" prefix the reconcile
+	// job uses to skip payments already flagged for a human.
+	ErrAmountMismatch = errors.New("amount_mismatch")
+	// ErrWebhookAmountMismatch: the provider confirms the stored amount but the
+	// webhook claims another. The webhook is rejected, but the payment is NOT
+	// excluded from reconcile (whose LIKE 'amount_mismatch%' filter this text
+	// deliberately does not match) — check-status is the source of truth.
+	ErrWebhookAmountMismatch      = errors.New("webhook_amount_mismatch")
+	ErrNotSettledAtProvider       = errors.New("provider has not settled the payment")
+	ErrProviderVerificationFailed = errors.New("could not confirm the payment with the provider")
+	ErrWebhookIgnored             = errors.New("webhook event ignored: not a settlement")
 )

@@ -96,6 +96,17 @@ func (a *Adapter) GetPaymentStatus(ctx context.Context, providerReference string
 	_ = ctx
 	a.mu.RLock()
 	st, ok := a.orders[providerReference]
+	// Copy every field we read while the lock is held: *st is mutated in
+	// place by MarkPaid and by the expiry write below, so reading it after
+	// RUnlock would race.
+	var (
+		amount    int64
+		status    string
+		expiresAt time.Time
+	)
+	if ok {
+		amount, status, expiresAt = st.Amount, st.Status, st.ExpiresAt
+	}
 	a.mu.RUnlock()
 	if !ok {
 		// Unknown ref (e.g. after API restart): treat as pending
@@ -105,8 +116,7 @@ func (a *Adapter) GetPaymentStatus(ctx context.Context, providerReference string
 		}, nil
 	}
 
-	status := st.Status
-	if status == "pending" && time.Now().After(st.ExpiresAt) {
+	if status == "pending" && time.Now().After(expiresAt) {
 		status = "expired"
 		a.mu.Lock()
 		if cur, exists := a.orders[providerReference]; exists && cur.Status == "pending" {
@@ -123,6 +133,7 @@ func (a *Adapter) GetPaymentStatus(ctx context.Context, providerReference string
 	return &provider.NormalizedPaymentStatus{
 		Status:            status,
 		ProviderReference: providerReference,
+		Amount:            &amount,
 	}, nil
 }
 

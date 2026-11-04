@@ -2,12 +2,16 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
@@ -22,6 +26,21 @@ type PaymentService struct {
 	providerRouter             *providerPkg.ProviderRouter
 	sandboxProvider            providerPkg.PaymentProvider
 	appBaseURL                 string
+
+	// Merchant-callback SSRF guards, as fields so tests can reach httptest
+	// servers on loopback. Production always uses netsafe: one client whose
+	// dial-time IP check is always on; a payment's environment only decides
+	// whether plain http is allowed (callbackValidate's allowHTTP).
+	callbackValidate func(raw string, allowHTTP bool) error
+	callbackClient   func() *http.Client
+	// callbackBatchBudget bounds how long one DeliverMerchantCallbacks run
+	// keeps sending (tests shrink it); see defaultCallbackBatchBudget.
+	callbackBatchBudget time.Duration
+
+	// Rotating position of the reconcile scan (see ReconcileRecentPayments).
+	reconcileMu     sync.Mutex
+	reconcileCursor *payment.ReconcileCursor
+	reconcileBatch  int // tests override; defaults to reconcileBatchSize
 }
 
 type providerCandidate struct {
@@ -36,12 +55,17 @@ func NewPaymentService(
 	providerRouter *providerPkg.ProviderRouter,
 	appBaseURL string,
 ) *PaymentService {
+	callbackHTTP := netsafe.NewSafeClient(10 * time.Second) // one client; the dial-time IP guard is always on
 	return &PaymentService{
 		paymentRepo:                paymentRepo,
 		merchantProviderConfigRepo: merchantProviderConfigRepo,
 		webhookEventRepo:           webhookEventRepo,
 		providerRouter:             providerRouter,
 		appBaseURL:                 strings.TrimRight(appBaseURL, "/"),
+		reconcileBatch:             reconcileBatchSize,
+		callbackValidate:           netsafe.ValidateCallbackURL,
+		callbackClient:             func() *http.Client { return callbackHTTP },
+		callbackBatchBudget:        defaultCallbackBatchBudget,
 	}
 }
 
@@ -66,7 +90,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 		return nil, err
 	}
 
-	env := payment.NormalizeEnvironment(req.Environment)
+	env := req.Environment // already resolved by req.Validate()
 	reference := s.generateReference()
 	expiresAt := time.Now().Add(time.Duration(req.ExpiresInMinutes) * time.Minute)
 
@@ -124,10 +148,6 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 
 		for _, candidate := range candidateProviders {
 			selectedProvider := candidate.provider
-			// Never route production traffic to sandbox mock
-			if selectedProvider.GetName() == "sandbox" {
-				continue
-			}
 			providerReq := &provider.ProviderPaymentRequest{
 				InternalReference:     reference,
 				Amount:                req.Amount,
@@ -143,6 +163,11 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 			logger.InfofCtx(ctx, "Creating PRODUCTION payment with provider: %s", selectedProvider.GetName())
 
 			providerResp, err = selectedProvider.CreatePayment(ctx, providerReq)
+			if err == nil && providerResp == nil {
+				// A (nil, nil) result is a provider bug; treat it as an error
+				// so failover rules apply and nothing dereferences nil.
+				err = fmt.Errorf("provider %s returned no response: %w", selectedProvider.GetName(), providerPkg.ErrProviderAPIError)
+			}
 			if err == nil {
 				if req.UseCustomMerchantName {
 					// Confirms whether the provider actually honored the
@@ -161,6 +186,9 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 				break
 			}
 
+			// Drop any response returned alongside an error so a failed
+			// attempt can never be persisted as a payment.
+			providerResp = nil
 			lastErr = err
 			logger.ErrorfCtx(ctx, "Provider %s error: %v", selectedProvider.GetName(), err)
 			if !candidate.failoverEnabled {
@@ -168,7 +196,12 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 			}
 		}
 
-		if lastErr != nil && providerResp == nil {
+		if providerResp == nil {
+			// Every candidate failed (or failover stopped after the first
+			// error). Never fall through to the nil response below.
+			if lastErr == nil {
+				lastErr = providerPkg.ErrProviderNotAvailable
+			}
 			return nil, fmt.Errorf("failed to create payment with available providers: %w", lastErr)
 		}
 	}
@@ -265,29 +298,23 @@ func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Pa
 		Message:        "Status unchanged",
 	}
 
-	if payment.IsTerminalStatus(p.Status) {
+	switch p.Status {
+	case payment.StatusPaid, payment.StatusFailed, payment.StatusCancelled:
 		result.Action = "skipped"
 		result.Message = "Payment already in terminal status"
 		return result, nil
 	}
 
-	// Local expire without needing provider when past expires_at.
-	if p.Status == payment.StatusPending && time.Now().After(p.ExpiresAt) {
-		if p.ProviderReference == nil || *p.ProviderReference == "" {
-			if err := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusExpired, nil); err != nil {
-				return nil, err
-			}
-			p.Status = payment.StatusExpired
-			result.CurrentStatus = payment.StatusExpired
-			result.Action = "expired_local"
-			result.Message = "Marked expired locally (no provider reference; expires_at passed)"
-			s.NotifyMerchantPaymentEvent(ctx, p, eventTypeForStatus(payment.StatusExpired))
-			result.MerchantNotified = true
-			return result, nil
-		}
-	}
+	// A pending payment past its deadline (plus expireGracePeriod, as in the
+	// expire job) may be expired locally; an expired one is only re-checked
+	// for a late settlement and never changed locally.
+	pastExpiry := p.Status == payment.StatusPending && time.Now().After(p.ExpiresAt.Add(expireGracePeriod))
+	hasRef := p.ProviderReference != nil && *p.ProviderReference != ""
 
-	if p.ProviderReference == nil || *p.ProviderReference == "" {
+	if !hasRef {
+		if pastExpiry {
+			return s.expireLocally(ctx, p, result, "Marked expired locally (no provider reference; expires_at passed)")
+		}
 		result.Action = "skipped"
 		result.Message = "No provider reference — cannot poll provider"
 		return result, nil
@@ -300,25 +327,15 @@ func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Pa
 		return result, nil
 	}
 
-	logger.InfofCtx(ctx, "Reconciling payment %s with provider %s ref %s", p.Reference, p.ProviderName, *p.ProviderReference)
+	// Debug: the automatic job runs this every 2 minutes per candidate; the
+	// per-run summary in ReconcileRecentPayments stays at Info.
+	logger.DebugfCtx(ctx, "Reconciling payment %s with provider %s ref %s", p.Reference, p.ProviderName, *p.ProviderReference)
 
-	providerStatus, err := selectedProvider.GetPaymentStatus(ctx, *p.ProviderReference)
+	providerStatus, err := s.checkProviderStatus(ctx, selectedProvider, *p.ProviderReference)
 	if err != nil {
 		logger.WarnfCtx(ctx, "Failed to check provider status for %s: %v", p.Reference, err)
-		// Fall back: if past expiry, expire locally even if provider check failed.
-		if p.Status == payment.StatusPending && time.Now().After(p.ExpiresAt) {
-			if updErr := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusExpired, nil); updErr != nil {
-				result.Action = "error"
-				result.Message = fmt.Sprintf("provider check failed: %v; local expire failed: %v", err, updErr)
-				return result, nil
-			}
-			p.Status = payment.StatusExpired
-			result.CurrentStatus = payment.StatusExpired
-			result.Action = "expired_local"
-			result.Message = fmt.Sprintf("Provider check failed (%v); marked expired locally (expires_at passed)", err)
-			s.NotifyMerchantPaymentEvent(ctx, p, eventTypeForStatus(payment.StatusExpired))
-			result.MerchantNotified = true
-			return result, nil
+		if pastExpiry {
+			return s.expireLocally(ctx, p, result, fmt.Sprintf("Provider check failed (%v); marked expired locally (expires_at passed)", err))
 		}
 		result.Action = "error"
 		result.Message = fmt.Sprintf("Provider check failed: %v", err)
@@ -328,45 +345,164 @@ func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Pa
 	ps := providerStatus.Status
 	result.ProviderStatus = &ps
 
-	if providerStatus.Status == p.Status {
-		// Still pending at provider but past local expiry → expire locally.
-		if p.Status == payment.StatusPending && time.Now().After(p.ExpiresAt) {
-			if err := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusExpired, nil); err != nil {
-				return nil, err
-			}
-			p.Status = payment.StatusExpired
-			result.CurrentStatus = payment.StatusExpired
-			result.Action = "expired_local"
-			result.Message = "Provider still pending; marked expired locally (expires_at passed)"
-			s.NotifyMerchantPaymentEvent(ctx, p, eventTypeForStatus(payment.StatusExpired))
-			result.MerchantNotified = true
+	if providerStatus.Status != payment.StatusPaid {
+		if pastExpiry {
+			return s.expireLocally(ctx, p, result, "Provider has not settled; marked expired locally (expires_at passed)")
+		}
+		result.Message = "Provider has not settled the payment"
+		return result, nil
+	}
+
+	if verifyErr := verifyProviderPayment(p, providerStatus, nil); verifyErr != nil {
+		logger.ErrorfCtx(ctx, "Payment %s: %v", p.Reference, verifyErr)
+		s.recordReconcileMismatch(ctx, p, providerStatus, verifyErr)
+		result.Action = "error"
+		result.Message = verifyErr.Error()
+		return result, nil
+	}
+
+	paidAt := providerStatus.PaidAt
+	if paidAt == nil {
+		now := time.Now()
+		paidAt = &now
+	}
+	// The settlement is confirmed: finish the update and the merchant
+	// callback even if the job is cancelled now (a paid payment is never
+	// revisited, so a dropped callback would be lost for good).
+	ctx, cancel := detached(ctx)
+	defer cancel()
+	previous, err := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusPaid, paidAt)
+	if err != nil {
+		if errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
+			result.Action = "skipped"
+			result.Message = "Payment changed concurrently"
 			return result, nil
 		}
-		result.Message = "Local status matches provider"
-		return result, nil
-	}
-
-	if !payment.CanTransitionTo(p.Status, providerStatus.Status) {
-		result.Action = "error"
-		result.Message = fmt.Sprintf(
-			"Invalid transition from %s to provider status %s",
-			p.Status,
-			providerStatus.Status,
-		)
-		return result, nil
-	}
-
-	if err := s.paymentRepo.UpdateStatus(ctx, p.ID, providerStatus.Status, providerStatus.PaidAt); err != nil {
 		return nil, err
 	}
-	p.Status = providerStatus.Status
-	p.PaidAt = providerStatus.PaidAt
-	result.CurrentStatus = providerStatus.Status
+
+	late := previous == payment.StatusExpired
+	p.Status = payment.StatusPaid
+	p.PaidAt = paidAt
+	result.CurrentStatus = payment.StatusPaid
 	result.Action = "updated"
-	result.Message = fmt.Sprintf("Status updated from %s to %s via provider", result.PreviousStatus, providerStatus.Status)
-	s.NotifyMerchantPaymentEvent(ctx, p, eventTypeForStatus(providerStatus.Status))
+	result.Message = fmt.Sprintf("Status updated from %s to paid via provider", previous)
+	if late {
+		result.Message += " (late payment)"
+	}
+	s.NotifyMerchantPaymentEvent(ctx, p, eventTypeForStatus(payment.StatusPaid), late)
 	result.MerchantNotified = true
 	return result, nil
+}
+
+// expireLocally marks a pending payment expired after its deadline. Losing a
+// race to a concurrent settlement is reported in the result, not an error.
+func (s *PaymentService) expireLocally(ctx context.Context, p *payment.Payment, result *ReconcileResult, message string) (*ReconcileResult, error) {
+	// Detached so a cancellation can't commit the expiry and then drop its
+	// merchant callback.
+	ctx, cancel := detached(ctx)
+	defer cancel()
+	if _, err := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusExpired, nil); err != nil {
+		if errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
+			result.Action = "skipped"
+			result.Message = "Payment changed concurrently"
+			return result, nil
+		}
+		return nil, err
+	}
+	p.Status = payment.StatusExpired
+	result.CurrentStatus = payment.StatusExpired
+	result.Action = "expired_local"
+	result.Message = message
+	s.NotifyMerchantPaymentEvent(ctx, p, eventTypeForStatus(payment.StatusExpired), false)
+	result.MerchantNotified = true
+	return result, nil
+}
+
+// recordReconcileMismatch stores an amount mismatch found by reconcile as a
+// webhook_events row, so it shows up in the admin logs/notifications like a
+// webhook mismatch and excludes the payment from later automatic runs.
+func (s *PaymentService) recordReconcileMismatch(ctx context.Context, p *payment.Payment, status *provider.NormalizedPaymentStatus, cause error) {
+	msg := cause.Error()
+	pid := p.ID
+	var providerAmount interface{}
+	if status.Amount != nil {
+		providerAmount = *status.Amount
+	}
+	ev := &provider.WebhookEvent{
+		PaymentID:         &pid,
+		ProviderName:      p.ProviderName,
+		ProviderReference: *p.ProviderReference,
+		EventType:         "reconcile.amount_mismatch",
+		Status:            "rejected",
+		RawPayload: map[string]interface{}{
+			"source":          "reconcile",
+			"provider_status": status.Status,
+			"provider_amount": providerAmount,
+			"expected_amount": p.Amount,
+		},
+		IsProcessed:     false,
+		ProcessingError: &msg,
+	}
+	if err := s.webhookEventRepo.Create(ctx, ev); err != nil {
+		logger.ErrorfCtx(ctx, "Failed to record reconcile amount mismatch for %s: %v", p.Reference, err)
+	}
+}
+
+// Automatic reconcile (scheduler job "reconcile-payments"). Cashi doesn't
+// document webhook retries, so this is the safety net that settles a payment
+// whose webhook was lost or failed verification, and catches late
+// settlements of payments that had already expired.
+const (
+	ReconcileInterval      = 2 * time.Minute
+	reconcilePendingWindow = 24 * time.Hour // pending: by created_at
+	reconcileExpiredWindow = 6 * time.Hour  // expired: by expires_at — a QRIS settlement later than this is implausible; admin reconcile remains for stragglers
+	reconcileBatchSize     = 50
+)
+
+// ReconcileRecentPayments re-checks recent pending/expired production
+// payments with their provider. Per-payment problems are logged and skipped
+// so one bad payment never stops the batch.
+//
+// Each run checks one batch and remembers where it stopped, so the whole
+// window is covered every ceil(N/batch) runs instead of only the newest
+// batch being re-checked forever (older payments' late settlements and lost
+// webhooks would otherwise be missed). The cursor is in memory: a restart
+// just starts again from the newest, which is harmless.
+func (s *PaymentService) ReconcileRecentPayments(ctx context.Context) error {
+	// The scheduler runs this serially, but the method is exported.
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+
+	candidates, err := s.paymentRepo.ListReconcileCandidates(ctx, time.Now(), reconcilePendingWindow, reconcileExpiredWindow, s.reconcileBatch, s.reconcileCursor)
+	if err != nil {
+		return fmt.Errorf("failed to list reconcile candidates: %w", err)
+	}
+	// A short batch means the scan reached the end of the window: wrap.
+	// Otherwise advance past the last row even if some payments below fail,
+	// so one bad payment never pins the scan.
+	wrapped := len(candidates) < s.reconcileBatch
+	if wrapped {
+		s.reconcileCursor = nil
+	} else {
+		last := candidates[len(candidates)-1]
+		s.reconcileCursor = &payment.ReconcileCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+	changed := 0
+	for _, p := range candidates {
+		r, err := s.reconcilePaymentData(ctx, p)
+		if err != nil {
+			logger.ErrorfCtx(ctx, "reconcile-payments: payment %s: %v", p.Reference, err)
+			continue
+		}
+		if r.Action == "updated" || r.Action == "expired_local" {
+			changed++
+		}
+	}
+	if len(candidates) > 0 {
+		logger.InfofCtx(ctx, "reconcile-payments: checked %d, changed %d, wrapped %t", len(candidates), changed, wrapped)
+	}
+	return nil
 }
 
 // ReconcilePendingPayments checks up to limit pending payments (admin batch).
@@ -434,10 +570,17 @@ func (s *PaymentService) resolveProvidersForMerchant(ctx context.Context, mercha
 
 		candidates := make([]providerCandidate, 0, len(defaultProviders))
 		for _, defaultProvider := range defaultProviders {
+			// Never route production traffic to the sandbox mock.
+			if defaultProvider.GetName() == provider.ProviderSandbox {
+				continue
+			}
 			candidates = append(candidates, providerCandidate{
 				provider:        defaultProvider,
 				failoverEnabled: true,
 			})
+		}
+		if len(candidates) == 0 {
+			return nil, providerPkg.ErrProviderNotAvailable
 		}
 		return candidates, nil
 	}
@@ -452,6 +595,13 @@ func (s *PaymentService) resolveProvidersForMerchant(ctx context.Context, mercha
 				merchantConfig.MerchantID,
 				merchantConfig.PaymentMethod,
 			)
+			continue
+		}
+
+		// Compare the resolved provider, not the stored string: GetProvider
+		// normalizes case/whitespace, so " Sandbox " would bypass a name check.
+		if selectedProvider.GetName() == provider.ProviderSandbox {
+			logger.WarnfCtx(ctx, "Skipping sandbox provider in production config for merchant %s", merchantConfig.MerchantID)
 			continue
 		}
 

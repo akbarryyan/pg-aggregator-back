@@ -1,10 +1,14 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
@@ -89,19 +93,25 @@ func (f *fakePaymentRepo) GetByProviderReference(ctx context.Context, providerRe
 	return &cp, nil
 }
 
-func (f *fakePaymentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) error {
+// UpdateStatus mirrors the real repository's guarded update: only allowed
+// source statuses move, and a refused move is explained the same way.
+func (f *fakePaymentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.byID[id]
 	if !ok {
-		return payment.ErrPaymentNotFound
+		return "", payment.ErrPaymentNotFound
 	}
 	if !payment.CanTransitionTo(p.Status, newStatus) {
-		return payment.ErrInvalidStatusTransition
+		if payment.IsTerminalStatus(p.Status) {
+			return "", payment.ErrPaymentAlreadyTerminal
+		}
+		return "", payment.ErrInvalidStatusTransition
 	}
+	previous := p.Status
 	p.Status = newStatus
 	p.PaidAt = paidAt
-	return nil
+	return previous, nil
 }
 
 func (f *fakePaymentRepo) List(ctx context.Context, limit, offset int) ([]*payment.Payment, error) {
@@ -196,6 +206,12 @@ func (f *fakePaymentRepo) ListAdmin(
 type fakeWebhookEventRepo struct {
 	mu     sync.Mutex
 	events map[uuid.UUID]*domainProvider.WebhookEvent
+	// order keeps insertion order so lastEvent is deterministic (map
+	// iteration order is random).
+	order []uuid.UUID
+	// failOnCancelledCtx makes Finalize fail like a real DB call would on a
+	// cancelled context, so tests can prove post-commit work is detached.
+	failOnCancelledCtx bool
 }
 
 func newFakeWebhookEventRepo() *fakeWebhookEventRepo {
@@ -208,9 +224,22 @@ func (f *fakeWebhookEventRepo) Create(ctx context.Context, e *domainProvider.Web
 	if e.ID == uuid.Nil {
 		e.ID = uuid.New()
 	}
+	if _, exists := f.events[e.ID]; !exists {
+		f.order = append(f.order, e.ID)
+	}
 	cp := *e
 	f.events[e.ID] = &cp
 	return nil
+}
+
+// last returns the most recently created event (with any Finalize applied).
+func (f *fakeWebhookEventRepo) last() *domainProvider.WebhookEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.order) == 0 {
+		return nil
+	}
+	return f.events[f.order[len(f.order)-1]]
 }
 
 func (f *fakeWebhookEventRepo) Finalize(
@@ -221,6 +250,9 @@ func (f *fakeWebhookEventRepo) Finalize(
 	isProcessed bool,
 	processingError *string,
 ) error {
+	if f.failOnCancelledCtx && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	e, ok := f.events[id]
@@ -257,6 +289,7 @@ func (f *fakeMerchantProviderConfigRepo) ListEnabledByMerchantAndPaymentMethod(
 // ---- fakeMerchantRepo ---------------------------------------------------
 
 type fakeMerchantRepo struct {
+	mu   sync.Mutex
 	byID map[uuid.UUID]*merchant.Merchant
 	// getByIDCalls counts GetByID invocations — used to assert batch
 	// callers cache/reuse merchant lookups instead of re-querying per item.
@@ -268,6 +301,8 @@ func newFakeMerchantRepo() *fakeMerchantRepo {
 }
 
 func (f *fakeMerchantRepo) GetByID(ctx context.Context, id uuid.UUID) (*merchant.Merchant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.getByIDCalls++
 	m, ok := f.byID[id]
 	if !ok {
@@ -277,6 +312,8 @@ func (f *fakeMerchantRepo) GetByID(ctx context.Context, id uuid.UUID) (*merchant
 }
 
 func (f *fakeMerchantRepo) SetWebhookSecret(ctx context.Context, id uuid.UUID, secret string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	m, ok := f.byID[id]
 	if !ok {
 		return nil // mirrors a real UPDATE matching 0 rows: no error
@@ -294,6 +331,16 @@ type fakeMerchantCallbackRepo struct {
 	// getByIDCalls counts GetByID invocations — used to assert batch
 	// retry reuses already-fetched rows instead of re-fetching each by ID.
 	getByIDCalls int
+	// failOnCancelledCtx makes Create fail like a real DB insert would on a
+	// cancelled context, so tests can prove the callback is still recorded.
+	failOnCancelledCtx bool
+	// updateResultErr, when set, makes UpdateResult fail without storing;
+	// updateResultCalls counts attempts either way.
+	updateResultErr   error
+	updateResultCalls int
+	// updateResultHook, when set, can reject a write (return non-nil) after
+	// the built-in checks, e.g. to force the detail-less fallback.
+	updateResultHook func(d *merchant.CallbackDelivery) error
 }
 
 func newFakeMerchantCallbackRepo() *fakeMerchantCallbackRepo {
@@ -301,6 +348,9 @@ func newFakeMerchantCallbackRepo() *fakeMerchantCallbackRepo {
 }
 
 func (f *fakeMerchantCallbackRepo) Create(ctx context.Context, d *merchant.CallbackDelivery) error {
+	if f.failOnCancelledCtx && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if d.ID == uuid.Nil {
@@ -319,30 +369,114 @@ func (f *fakeMerchantCallbackRepo) GetByID(ctx context.Context, id uuid.UUID) (*
 	if !ok {
 		return nil, fmt.Errorf("callback delivery not found")
 	}
-	return d, nil
+	// A copy, like a real SELECT: the caller holds a snapshot, so writing it
+	// back later can clobber changes made since (what the retry-race tests
+	// need to be able to see).
+	cp := *d
+	return &cp, nil
 }
 
 func (f *fakeMerchantCallbackRepo) UpdateResult(ctx context.Context, d *merchant.CallbackDelivery) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.updateResultCalls++
+	if f.updateResultErr != nil {
+		return f.updateResultErr
+	}
+	// Like PostgreSQL TEXT (SQLSTATE 22021): invalid UTF-8 or NUL is rejected
+	// and nothing is written.
+	for _, p := range []*string{d.ResponseBody, d.ErrorMessage} {
+		if p != nil && (!utf8.ValidString(*p) || strings.ContainsRune(*p, 0)) {
+			return fmt.Errorf("pq: invalid byte sequence for encoding \"UTF8\"")
+		}
+	}
+	if f.updateResultHook != nil {
+		if err := f.updateResultHook(d); err != nil {
+			return err
+		}
+	}
 	f.byID[d.ID] = d
 	return nil
 }
 
-func (f *fakeMerchantCallbackRepo) ListDueForRetry(ctx context.Context, before time.Time, limit int) ([]merchant.CallbackDelivery, error) {
+// ReleaseClaimed mirrors the repository: only rows still 'sending' go back
+// to 'pending'.
+func (f *fakeMerchantCallbackRepo) ReleaseClaimed(ctx context.Context, ids []uuid.UUID, now time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for _, id := range ids {
+		if d, ok := f.byID[id]; ok && d.Status == merchant.CallbackStatusSending {
+			d.Status = merchant.CallbackStatusPending
+			d.UpdatedAt = now
+			n++
+		}
+	}
+	return n, nil
+}
+
+// ClearRetrySchedule mirrors the repository: only a failed row that still
+// has a schedule is changed.
+func (f *fakeMerchantCallbackRepo) ClearRetrySchedule(ctx context.Context, id uuid.UUID, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.byID[id]
+	if !ok || d.Status != merchant.CallbackStatusFailed || d.NextRetryAt == nil {
+		return false, nil
+	}
+	d.NextRetryAt = nil
+	d.UpdatedAt = now
+	return true, nil
+}
+
+// ClaimDue mirrors the repository's claim: pending rows plus 'sending' rows
+// not touched for staleAfter are flipped to 'sending' and returned as copies.
+func (f *fakeMerchantCallbackRepo) ClaimDue(ctx context.Context, now time.Time, limit int, staleAfter time.Duration) ([]merchant.CallbackDelivery, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]merchant.CallbackDelivery, 0)
 	for _, d := range f.byID {
-		if d.Status != merchant.CallbackStatusFailed || d.NextRetryAt == nil || d.NextRetryAt.After(before) {
+		stale := d.Status == merchant.CallbackStatusSending && !d.UpdatedAt.After(now.Add(-staleAfter))
+		if d.Status != merchant.CallbackStatusPending && !stale {
 			continue
 		}
+		d.Status = merchant.CallbackStatusSending
+		d.UpdatedAt = now
 		out = append(out, *d)
 		if limit > 0 && len(out) >= limit {
 			break
 		}
 	}
 	return out, nil
+}
+
+// RequeueDueFailed mirrors the repository's requeue: each due failed row
+// spawns a new pending attempt and has its own retry schedule cleared.
+func (f *fakeMerchantCallbackRepo) RequeueDueFailed(ctx context.Context, now time.Time, limit int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Collect first, insert after the loop: rows added to a map during
+	// range may or may not be visited, which would make this nondeterministic.
+	retries := make([]*merchant.CallbackDelivery, 0)
+	for _, d := range f.byID {
+		if d.Status != merchant.CallbackStatusFailed || d.NextRetryAt == nil || d.NextRetryAt.After(now) {
+			continue
+		}
+		retries = append(retries, &merchant.CallbackDelivery{
+			ID: uuid.New(), PaymentID: d.PaymentID, MerchantID: d.MerchantID, EventType: d.EventType,
+			TargetURL: d.TargetURL, RequestPayload: d.RequestPayload, AttemptNumber: d.AttemptNumber + 1,
+			Status: merchant.CallbackStatusPending, CreatedAt: now, UpdatedAt: now,
+		})
+		d.NextRetryAt = nil
+		if limit > 0 && len(retries) >= limit {
+			break
+		}
+	}
+	for _, r := range retries {
+		f.byID[r.ID] = r
+		f.created = append(f.created, r)
+	}
+	return int64(len(retries)), nil
 }
 
 // ---- fakeProvider (PaymentProvider) --------------------------------------
@@ -355,9 +489,20 @@ type fakeProvider struct {
 	createCalls int
 	createResp  *domainProvider.ProviderPaymentResponse
 	createErr   error
+	// createRaw, when set, returns its (resp, err) verbatim so tests can
+	// model misbehaving providers (resp+err together, or nil+nil).
+	createRaw func() (*domainProvider.ProviderPaymentResponse, error)
 
 	statusResp *domainProvider.NormalizedPaymentStatus
 	statusErr  error
+	// onStatus, when set, runs at the start of GetPaymentStatus so tests can
+	// simulate another caller acting between the precheck and the update.
+	onStatus func()
+	// statusRefs records every providerReference GetPaymentStatus was asked
+	// about. Guarded by mu: concurrent-webhook tests call GetPaymentStatus
+	// from several goroutines; read it via refs().
+	mu         sync.Mutex
+	statusRefs []string
 
 	validateErr error
 
@@ -369,6 +514,9 @@ func (f *fakeProvider) GetName() string { return f.name }
 
 func (f *fakeProvider) CreatePayment(ctx context.Context, req *domainProvider.ProviderPaymentRequest) (*domainProvider.ProviderPaymentResponse, error) {
 	f.createCalls++
+	if f.createRaw != nil {
+		return f.createRaw()
+	}
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -386,6 +534,12 @@ func (f *fakeProvider) CreatePayment(ctx context.Context, req *domainProvider.Pr
 }
 
 func (f *fakeProvider) GetPaymentStatus(ctx context.Context, providerReference string) (*domainProvider.NormalizedPaymentStatus, error) {
+	f.mu.Lock()
+	f.statusRefs = append(f.statusRefs, providerReference)
+	f.mu.Unlock()
+	if f.onStatus != nil {
+		f.onStatus()
+	}
 	if f.statusErr != nil {
 		return nil, f.statusErr
 	}
@@ -394,6 +548,19 @@ func (f *fakeProvider) GetPaymentStatus(ctx context.Context, providerReference s
 		return &resp, nil
 	}
 	return &domainProvider.NormalizedPaymentStatus{Status: "pending", ProviderReference: providerReference}, nil
+}
+
+// refs returns a copy of the references GetPaymentStatus was asked about.
+func (f *fakeProvider) refs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.statusRefs...)
+}
+
+func (f *fakeProvider) resetRefs() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusRefs = nil
 }
 
 func (f *fakeProvider) ValidateWebhook(rawPayload []byte, signature string) error {
@@ -542,4 +709,49 @@ func (f *fakePaymentLinkRepo) SetActive(ctx context.Context, id uuid.UUID, isAct
 	}
 	l.IsActive = isActive
 	return nil
+}
+
+func ptrInt64(v int64) *int64 { return &v }
+
+// ListReconcileCandidates applies the same environment/status/window rules
+// as the real query; the amount-mismatch exclusion is SQL-only and covered
+// by the repository test.
+func (f *fakePaymentRepo) ListReconcileCandidates(ctx context.Context, now time.Time, pendingWindow, expiredWindow time.Duration, limit int, after *payment.ReconcileCursor) ([]*payment.Payment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pendingSince, expiredSince := now.Add(-pendingWindow), now.Add(-expiredWindow)
+	out := make([]*payment.Payment, 0)
+	for _, p := range f.byID {
+		if p.Environment != payment.EnvironmentProduction || p.ProviderReference == nil || *p.ProviderReference == "" {
+			continue
+		}
+		pendingRecent := p.Status == payment.StatusPending && !p.CreatedAt.Before(pendingSince)
+		expiredRecent := p.Status == payment.StatusExpired && !p.ExpiresAt.Before(expiredSince)
+		if !pendingRecent && !expiredRecent {
+			continue
+		}
+		// Keyset rule of the real query: strictly after the cursor in
+		// (created_at DESC, id DESC) order.
+		if after != nil && !reconcileOrderBefore(after.CreatedAt, after.ID, p.CreatedAt, p.ID) {
+			continue
+		}
+		cp := *p
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return reconcileOrderBefore(out[i].CreatedAt, out[i].ID, out[j].CreatedAt, out[j].ID)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// reconcileOrderBefore reports whether (aAt, aID) sorts before (bAt, bID) in
+// (created_at DESC, id DESC) order. PostgreSQL compares uuids bytewise.
+func reconcileOrderBefore(aAt time.Time, aID uuid.UUID, bAt time.Time, bID uuid.UUID) bool {
+	if !aAt.Equal(bAt) {
+		return aAt.After(bAt)
+	}
+	return bytes.Compare(aID[:], bID[:]) > 0
 }

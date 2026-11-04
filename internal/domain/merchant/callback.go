@@ -8,6 +8,8 @@ import (
 
 const (
 	CallbackStatusPending = "pending"
+	// CallbackStatusSending marks a delivery claimed by a worker and in flight.
+	CallbackStatusSending = "sending"
 	CallbackStatusSuccess = "success"
 	CallbackStatusFailed  = "failed"
 	CallbackStatusSkipped = "skipped"

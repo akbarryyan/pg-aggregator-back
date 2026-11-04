@@ -41,16 +41,30 @@ func (h *WebhookHandler) HandleProviderWebhook(w http.ResponseWriter, r *http.Re
 	logger.InfofCtx(r.Context(), "Received webhook from provider %s, signature present: %v", providerName, signature != "")
 
 	if err := h.paymentService.ProcessWebhook(r.Context(), providerName, rawPayload, signature); err != nil {
-		logger.ErrorfCtx(r.Context(), "Failed to process webhook: %v", err)
-		if errors.Is(err, payment.ErrDuplicateWebhook) || errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
+		switch {
+		case errors.Is(err, payment.ErrDuplicateWebhook),
+			errors.Is(err, payment.ErrPaymentAlreadyTerminal),
+			errors.Is(err, payment.ErrWebhookIgnored),
+			errors.Is(err, payment.ErrAmountMismatch),
+			errors.Is(err, payment.ErrWebhookAmountMismatch):
+			// Acknowledge so the provider doesn't keep retrying: these are
+			// duplicates, non-settlements, or an amount mismatch (provider-side
+			// ones are flagged for a human; webhook-only ones are left to
+			// reconcile).
+			logger.InfofCtx(r.Context(), "Webhook acknowledged without status change: %v", err)
 			respondJSON(w, http.StatusOK, map[string]string{
 				"status":  "ignored",
-				"message": "Webhook already processed",
+				"message": "Webhook acknowledged without a status change",
 			})
-			return
+		case errors.Is(err, payment.ErrProviderVerificationFailed):
+			// The provider couldn't confirm the settlement yet: ask it to
+			// retry. The reconcile job is the fallback if it never does.
+			logger.WarnfCtx(r.Context(), "Webhook not confirmed by provider: %v", err)
+			respondError(w, http.StatusBadGateway, "Payment not yet confirmed by provider; retry later")
+		default:
+			logger.ErrorfCtx(r.Context(), "Failed to process webhook: %v", err)
+			respondError(w, http.StatusBadRequest, "Webhook processing failed")
 		}
-
-		respondError(w, http.StatusBadRequest, "Webhook processing failed")
 		return
 	}
 

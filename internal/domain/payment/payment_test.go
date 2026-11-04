@@ -1,8 +1,10 @@
 package payment
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
 	"github.com/google/uuid"
 )
 
@@ -188,7 +190,9 @@ func TestCanTransitionTo(t *testing.T) {
 		{"pending to cancelled allowed", StatusPending, StatusCancelled, true},
 		{"same status not a transition", StatusPending, StatusPending, false},
 		{"paid is terminal, cannot move to expired", StatusPaid, StatusExpired, false},
-		{"expired is terminal, cannot move to paid", StatusExpired, StatusPaid, false},
+		{"expired to paid allowed (late settlement)", StatusExpired, StatusPaid, true},
+		{"expired cannot move to failed", StatusExpired, StatusFailed, false},
+		{"paid to paid is not a transition", StatusPaid, StatusPaid, false},
 		{"failed is terminal, cannot move to pending", StatusFailed, StatusPending, false},
 		{"cancelled is terminal, cannot move to paid", StatusCancelled, StatusPaid, false},
 		{"unknown source status rejected", "unknown", StatusPaid, false},
@@ -216,5 +220,120 @@ func TestToPaymentResponse_DefaultsEnvironmentAndBuildsCheckoutURL(t *testing.T)
 	}
 	if resp.CheckoutURL != "https://app.example.com/pay/PAY-123" {
 		t.Errorf("unexpected checkout URL: %q", resp.CheckoutURL)
+	}
+}
+
+func TestAllowedSourceStatuses(t *testing.T) {
+	cases := map[string][]string{
+		StatusPaid:      {StatusPending, StatusExpired},
+		StatusExpired:   {StatusPending},
+		StatusFailed:    {StatusPending},
+		StatusCancelled: {StatusPending},
+		StatusPending:   nil,
+		"unknown":       nil,
+	}
+	for to, want := range cases {
+		got := AllowedSourceStatuses(to)
+		if len(got) != len(want) {
+			t.Fatalf("AllowedSourceStatuses(%q) = %v, want %v", to, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("AllowedSourceStatuses(%q) = %v, want %v", to, got, want)
+			}
+		}
+	}
+}
+
+func TestParseEnvironment(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", EnvironmentSandbox, false},
+		{"   ", EnvironmentSandbox, false},
+		{"sandbox", EnvironmentSandbox, false},
+		{"test", EnvironmentSandbox, false},
+		{"dev", EnvironmentSandbox, false},
+		{"development", EnvironmentSandbox, false},
+		{"production", EnvironmentProduction, false},
+		{"prod", EnvironmentProduction, false},
+		{"live", EnvironmentProduction, false},
+		{" Production ", EnvironmentProduction, false},
+		{"prodution", "", true},
+		{"garbage", "", true},
+	}
+	for _, tc := range cases {
+		got, err := ParseEnvironment(tc.in)
+		if tc.wantErr {
+			if !errors.Is(err, ErrInvalidEnvironment) {
+				t.Errorf("ParseEnvironment(%q) error = %v, want ErrInvalidEnvironment", tc.in, err)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("ParseEnvironment(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+}
+
+func TestCreatePaymentRequest_ValidateEnvironment(t *testing.T) {
+	base := func() *CreatePaymentRequest {
+		return &CreatePaymentRequest{MerchantID: uuid.New(), Amount: 10000, PaymentMethod: PaymentMethodQRIS, Description: "x"}
+	}
+	r := base()
+	if err := r.Validate(); err != nil || r.Environment != EnvironmentSandbox {
+		t.Fatalf("empty environment: Validate() = %v, env %q; want nil, sandbox", err, r.Environment)
+	}
+	r = base()
+	r.Environment = "nope"
+	if err := r.Validate(); !errors.Is(err, ErrInvalidEnvironment) {
+		t.Fatalf("unknown environment: Validate() = %v, want ErrInvalidEnvironment", err)
+	}
+}
+
+func TestCreatePaymentRequest_ValidateCallbackURL(t *testing.T) {
+	base := func(env, cb string) *CreatePaymentRequest {
+		r := &CreatePaymentRequest{MerchantID: uuid.New(), Amount: 10000, PaymentMethod: PaymentMethodQRIS, Description: "x", Environment: env}
+		if cb != "NIL" {
+			r.CallbackURL = &cb
+		}
+		return r
+	}
+	cases := []struct {
+		name    string
+		env     string
+		cb      string
+		wantErr bool
+		wantNil bool
+	}{
+		{"production https ok", EnvironmentProduction, "https://shop.example.com/cb", false, false},
+		{"production http rejected", EnvironmentProduction, "http://shop.example.com/cb", true, false},
+		{"production internal rejected", EnvironmentProduction, "https://169.254.169.254/x", true, false},
+		{"sandbox http public ok", EnvironmentSandbox, "http://shop.example.com/cb", false, false},
+		{"sandbox http localhost rejected", EnvironmentSandbox, "http://localhost:3000/cb", true, false},
+		{"sandbox internal ip rejected", EnvironmentSandbox, "http://169.254.169.254/x", true, false},
+		{"empty env means sandbox, http public ok", "", "http://shop.example.com/cb", false, false},
+		{"blank callback becomes nil", EnvironmentProduction, "   ", false, true},
+		{"absent callback ok", EnvironmentProduction, "NIL", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := base(tc.env, tc.cb)
+			err := r.Validate()
+			if tc.wantErr {
+				if !errors.Is(err, netsafe.ErrInvalidCallbackURL) {
+					t.Fatalf("want ErrInvalidCallbackURL, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantNil && r.CallbackURL != nil {
+				t.Errorf("CallbackURL = %q, want nil", *r.CallbackURL)
+			}
+		})
 	}
 }

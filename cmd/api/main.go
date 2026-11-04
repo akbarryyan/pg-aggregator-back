@@ -9,12 +9,14 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/config"
 	"github.com/akbarryyan/pg-aggregator-back/internal/handler"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
+	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
 	"github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/provider/cashi"
 	"github.com/akbarryyan/pg-aggregator-back/internal/provider/sandbox"
@@ -40,6 +42,10 @@ func main() {
 		logger.Errorf("Failed to load config: %v", err)
 		os.Exit(1)
 	}
+
+	// Our own API and frontend hosts resolve to public IPs, so the SSRF IP
+	// guard can't stop a merchant from pointing a callback at us.
+	netsafe.SetBlockedHosts([]string{cfg.App.URL, cfg.App.FrontendURL})
 
 	db, err := initDB(cfg)
 	if err != nil {
@@ -82,7 +88,7 @@ func main() {
 	// project backlog item #9, into these cohesive services — it no longer
 	// exists as a type.
 	adminPaymentService := service.NewAdminPaymentService(paymentRepo, merchantRepo)
-	adminMerchantService := service.NewAdminMerchantService(merchantRepo, merchantProviderConfigRepo, adminPaymentService)
+	adminMerchantService := service.NewAdminMerchantService(merchantRepo, merchantProviderConfigRepo, adminPaymentService).WithProviderRegistry(providerRouter)
 	adminProviderService := service.NewAdminProviderService(paymentRepo, merchantProviderConfigRepo, providerRouter)
 	adminDashboardService := service.NewAdminDashboardService(merchantRepo, paymentRepo, webhookEventRepo, adminPaymentService)
 	adminNotificationService := service.NewAdminNotificationService(paymentRepo, webhookEventRepo).
@@ -127,18 +133,27 @@ func main() {
 	publicRateLimiter := newRateLimiter(cfg.RateLimit.Public, trustedProxies)
 	sensitiveRateLimiter := newRateLimiter(cfg.RateLimit.Sensitive, trustedProxies)
 
-	// Background jobs: expire unpaid payments past their deadline, auto-retry
-	// failed merchant callbacks, and evict idle rate-limit buckets. A single
+	// Background jobs: expire unpaid payments past their deadline, send
+	// queued merchant callbacks (and retry failed ones) every few seconds,
+	// re-check recent pending/expired production payments with the provider
+	// (reconcile-payments), and evict idle rate-limit buckets. A single
 	// in-process ticker is enough at this stage (see internal/scheduler) — no
-	// Redis/Asynq needed until the API runs as more than one instance.
+	// Redis/Asynq needed until the API runs as more than one instance. Each
+	// job is tracked so shutdown can wait for in-flight work to finish.
 	bgCtx, cancelBackgroundJobs := context.WithCancel(context.Background())
 	defer cancelBackgroundJobs()
-	go scheduler.RunPeriodic(bgCtx, time.Minute, "expire-payments", paymentService.ExpirePayments)
-	go scheduler.RunPeriodic(bgCtx, time.Minute, "retry-merchant-callbacks", func(ctx context.Context) error {
-		_, err := paymentService.RetryDueMerchantCallbacks(ctx, 50)
-		return err
-	})
-	go scheduler.RunPeriodic(bgCtx, 10*time.Minute, "rate-limiter-cleanup", func(ctx context.Context) error {
+	var jobs sync.WaitGroup
+	startJob := func(interval time.Duration, name string, task func(context.Context) error) {
+		jobs.Add(1)
+		go func() {
+			defer jobs.Done()
+			scheduler.RunPeriodic(bgCtx, interval, name, task)
+		}()
+	}
+	startJob(time.Minute, "expire-payments", paymentService.ExpirePayments)
+	startJob(service.CallbackDeliveryInterval, "deliver-merchant-callbacks", paymentService.DeliverMerchantCallbacks)
+	startJob(service.ReconcileInterval, "reconcile-payments", paymentService.ReconcileRecentPayments)
+	startJob(10*time.Minute, "rate-limiter-cleanup", func(ctx context.Context) error {
 		authRateLimiter.Cleanup(30 * time.Minute)
 		publicRateLimiter.Cleanup(30 * time.Minute)
 		sensitiveRateLimiter.Cleanup(30 * time.Minute)
@@ -184,6 +199,10 @@ func main() {
 
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Errorf("Server forced to shutdown: %v", err)
+	}
+
+	if !waitForJobs(&jobs, 15*time.Second) {
+		logger.Warnf("Background jobs did not finish within 15s; unsent callbacks will be re-claimed after restart")
 	}
 
 	logger.Info("Server exited")

@@ -250,6 +250,79 @@ Kode: kembalikan tag sebelumnya di `x-api-image:`, lalu `docker compose up -d`.
 Migration hanya maju: bila migration rilis baru tidak kompatibel dengan kode
 lama, pulihkan backup dari langkah 4 (lihat bagian 5).
 
+### 4.2 Cek sebelum deploy Paket 2
+
+Paket 2 menolak `webhook_url` merchant yang tidak `https` (selalu; hanya
+`callback_url` payment sandbox yang boleh `http`) dan URL yang
+menunjuk ke alamat internal, dan mengirim callback merchant secara asinkron
+lewat antrean di DB. Lakukan langkah berikut sebelum `make migrate` dan
+`docker compose up -d` pada rilis ini, di `psql` pada DB produksi.
+
+1. **Cari URL yang akan ditolak.** Hasilnya adalah daftar merchant/payment
+   yang URL-nya akan ditolak:
+
+   ```sql
+   -- Skema non-https, atau host yang jelas internal (juga untuk https).
+   SELECT id, webhook_url FROM merchants
+   WHERE webhook_url IS NOT NULL
+     AND (webhook_url !~* '^https://'
+          OR webhook_url ~* '://(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|\[)');
+
+   SELECT id, reference, callback_url FROM payments
+   WHERE callback_url IS NOT NULL
+     AND environment = 'production' AND created_at > now() - interval '30 days'
+     AND (callback_url !~* '^https://'
+          OR callback_url ~* '://(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|\[)');
+   ```
+
+   Ini heuristik: pola host internal hanya menangkap bentuk yang umum (IP
+   literal privat/loopback/link-local, `localhost`, IPv6 dalam `[...]`).
+   Nama domain yang resolve ke alamat internal tidak tertangkap; itu tetap
+   diblokir saat pengiriman (delivery menjadi `failed` tanpa retry).
+
+2. **Bersihkan callback `pending` lama.** Kode lama bisa meninggalkan baris
+   yang macet di `pending` (tidak pernah dikirim ulang). Worker baru
+   mengirim **semua** baris `pending` pada tick pertamanya, termasuk callback
+   berumur berhari-hari yang tidak lagi diharapkan merchant. Periksa dulu:
+
+   ```sql
+   SELECT count(*), min(created_at) FROM merchant_callback_deliveries WHERE status = 'pending';
+   ```
+
+   Lalu tandai yang lebih tua dari 1 jam agar tidak dikirim:
+
+   ```sql
+   UPDATE merchant_callback_deliveries
+   SET status = 'skipped', error_message = 'stale pre-async row, not re-sent', updated_at = now()
+   WHERE status = 'pending' AND created_at < now() - interval '1 hour';
+   ```
+
+3. **`stop_grace_period`.** `docker-compose.yaml` memberi service `api`
+   `stop_grace_period: 50s`. Shutdown bisa memakan hingga 30 detik (drain
+   HTTP) ditambah 15 detik (menunggu job latar); default Docker 10 detik akan
+   SIGKILL pengiriman callback yang sedang berjalan sebelum hasilnya
+   tercatat. Pastikan salinan `docker-compose.yaml` di VPS ikut memuat baris
+   ini.
+
+4. **Migration `016_add_callback_queue_indexes.sql`.** Menambah dua indeks
+   parsial untuk antrean callback dan komentar kolom `status`. Jalankan
+   `make migrate` **sebelum** memulai image API baru. Idempoten
+   (`IF NOT EXISTS`); indeks dibuat tanpa `CONCURRENTLY`, tidak masalah untuk
+   tabel sekecil ini (penguncian tulis singkat).
+
+5. **Callback yang gagal permanen karena URL lama.** Retry manual admin kini
+   memakai URL **terkini**: `callback_url` payment, kalau kosong
+   `webhook_url` merchant, dan hanya bila payment tidak ada atau keduanya
+   kosong memakai `target_url` yang tersimpan. Jadi setelah merchant
+   memperbaiki URL-nya, admin cukup menekan retry. URL baru tetap divalidasi.
+   (Retry otomatis tetap memakai `target_url` tersimpan.)
+
+6. **Domain kita sendiri ditolak sebagai tujuan callback.** Host dari
+   `app.url` dan `app.frontend_url` di `.config.toml` (beserta subdomainnya)
+   ditolak oleh validator. Pastikan keduanya terisi benar. Cek merchant yang
+   `webhook_url`-nya menunjuk ke domain kita; mereka akan ditolak saat update
+   dan gagal permanen saat kirim.
+
 ## 5. Operasional
 
 ```bash

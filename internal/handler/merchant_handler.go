@@ -295,13 +295,15 @@ func (h *MerchantHandler) CreatePayment(w http.ResponseWriter, r *http.Request) 
 	if strings.TrimSpace(req.Environment) == "" {
 		req.Environment = strings.TrimSpace(r.URL.Query().Get("environment"))
 	}
-	req.Environment = payment.NormalizeEnvironment(req.Environment)
 	if err := req.Validate(); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	p, err := h.paymentService.CreatePayment(r.Context(), &req)
 	if err != nil {
+		if respondInvalidCallbackURL(w, err) {
+			return
+		}
 		logger.ErrorfCtx(r.Context(), "merchant create payment: %v", err)
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -427,6 +429,9 @@ func (h *MerchantHandler) UpdateBusiness(w http.ResponseWriter, r *http.Request)
 	}
 	m, err := h.adminMerchantService.UpdateMerchant(r.Context(), merchantID, &req)
 	if err != nil {
+		if respondInvalidCallbackURL(w, err) {
+			return
+		}
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}

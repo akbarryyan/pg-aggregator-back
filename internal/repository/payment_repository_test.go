@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -174,43 +175,40 @@ func TestPaymentRepository_List(t *testing.T) {
 	}
 }
 
-// TestPaymentRepository_UpdateStatus_RejectsInvalidTransition verifies the
-// defense-in-depth check at the repository layer: even if a caller (or a
-// future bug in the service layer) tries an illegal transition like
-// paid → pending, the repository refuses it and issues no UPDATE at all.
-func TestPaymentRepository_UpdateStatus_RejectsInvalidTransition(t *testing.T) {
+const updateStatusSQL = `(?s)UPDATE payments p SET status = \$1, paid_at = \$2, updated_at = \$3.*FROM \(SELECT id, status FROM payments WHERE id = \$4 FOR UPDATE\) prev.*WHERE p.id = prev.id AND p.status IN \(%s\).*RETURNING prev.status`
+
+func TestPaymentRepository_UpdateStatus_PaidFromPendingOrExpired(t *testing.T) {
 	db, mock := newMockDB(t)
 	repo := NewPaymentRepository(db)
-	p := samplePayment()
-	p.Status = payment.StatusPaid // terminal — no transition is legal from here
+	id := uuid.New()
+	paidAt := time.Now()
 
-	mock.ExpectQuery(`SELECT .* FROM payments WHERE id = \$1`).
-		WithArgs(p.ID).
-		WillReturnRows(sqlmock.NewRows(paymentCols).AddRow(paymentRow(p)...))
+	mock.ExpectQuery(fmt.Sprintf(updateStatusSQL, `\$5, \$6`)).
+		WithArgs(payment.StatusPaid, &paidAt, sqlmock.AnyArg(), id, payment.StatusPending, payment.StatusExpired).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(payment.StatusExpired))
 
-	err := repo.UpdateStatus(context.Background(), p.ID, payment.StatusPending, nil)
-	if !errors.Is(err, payment.ErrInvalidStatusTransition) {
-		t.Fatalf("expected ErrInvalidStatusTransition, got %v", err)
+	prev, err := repo.UpdateStatus(context.Background(), id, payment.StatusPaid, &paidAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prev != payment.StatusExpired {
+		t.Errorf("previous status = %q, want expired", prev)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("unmet expectations (an UPDATE must not have been issued): %v", err)
+		t.Errorf("unmet expectations: %v", err)
 	}
 }
 
-func TestPaymentRepository_UpdateStatus_ValidTransition(t *testing.T) {
+func TestPaymentRepository_UpdateStatus_ExpireOnlyFromPending(t *testing.T) {
 	db, mock := newMockDB(t)
 	repo := NewPaymentRepository(db)
-	p := samplePayment()
-	p.Status = payment.StatusPending
+	id := uuid.New()
 
-	mock.ExpectQuery(`SELECT .* FROM payments WHERE id = \$1`).
-		WithArgs(p.ID).
-		WillReturnRows(sqlmock.NewRows(paymentCols).AddRow(paymentRow(p)...))
-	mock.ExpectExec(`UPDATE payments`).
-		WithArgs(payment.StatusPaid, sqlmock.AnyArg(), sqlmock.AnyArg(), p.ID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(fmt.Sprintf(updateStatusSQL, `\$5`)).
+		WithArgs(payment.StatusExpired, sqlmock.AnyArg(), sqlmock.AnyArg(), id, payment.StatusPending).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(payment.StatusPending))
 
-	if err := repo.UpdateStatus(context.Background(), p.ID, payment.StatusPaid, nil); err != nil {
+	if _, err := repo.UpdateStatus(context.Background(), id, payment.StatusExpired, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -218,18 +216,53 @@ func TestPaymentRepository_UpdateStatus_ValidTransition(t *testing.T) {
 	}
 }
 
-func TestPaymentRepository_UpdateStatus_PaymentNotFound(t *testing.T) {
+// No row matched the guarded UPDATE: someone else moved the payment first
+// (or it was never eligible). The repository re-reads it to explain why.
+func TestPaymentRepository_UpdateStatus_NoRowsReportsTerminal(t *testing.T) {
+	db, mock := newMockDB(t)
+	repo := NewPaymentRepository(db)
+	p := samplePayment()
+	p.Status = payment.StatusPaid
+
+	mock.ExpectQuery(fmt.Sprintf(updateStatusSQL, `\$5`)).
+		WithArgs(payment.StatusExpired, sqlmock.AnyArg(), sqlmock.AnyArg(), p.ID, payment.StatusPending).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`SELECT .* FROM payments WHERE id = \$1`).
+		WithArgs(p.ID).
+		WillReturnRows(sqlmock.NewRows(paymentCols).AddRow(paymentRow(p)...))
+
+	_, err := repo.UpdateStatus(context.Background(), p.ID, payment.StatusExpired, nil)
+	if !errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
+		t.Fatalf("expected ErrPaymentAlreadyTerminal, got %v", err)
+	}
+}
+
+func TestPaymentRepository_UpdateStatus_NoRowsPaymentNotFound(t *testing.T) {
 	db, mock := newMockDB(t)
 	repo := NewPaymentRepository(db)
 	id := uuid.New()
 
-	mock.ExpectQuery(`SELECT .* FROM payments WHERE id = \$1`).
-		WithArgs(id).
-		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(fmt.Sprintf(updateStatusSQL, `\$5, \$6`)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`SELECT .* FROM payments WHERE id = \$1`).WithArgs(id).WillReturnError(sql.ErrNoRows)
 
-	err := repo.UpdateStatus(context.Background(), id, payment.StatusPaid, nil)
+	_, err := repo.UpdateStatus(context.Background(), id, payment.StatusPaid, nil)
 	if !errors.Is(err, payment.ErrPaymentNotFound) {
 		t.Fatalf("expected ErrPaymentNotFound, got %v", err)
+	}
+}
+
+// A target no status may move to (e.g. back to pending) is refused before
+// any SQL is issued.
+func TestPaymentRepository_UpdateStatus_InvalidTargetIssuesNoSQL(t *testing.T) {
+	db, mock := newMockDB(t)
+	repo := NewPaymentRepository(db)
+
+	_, err := repo.UpdateStatus(context.Background(), uuid.New(), payment.StatusPending, nil)
+	if !errors.Is(err, payment.ErrInvalidStatusTransition) {
+		t.Fatalf("expected ErrInvalidStatusTransition, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unexpected SQL issued: %v", err)
 	}
 }
 
@@ -248,5 +281,71 @@ func TestPaymentRepository_CountByPaymentLinkID(t *testing.T) {
 	}
 	if count != 3 {
 		t.Errorf("expected 3, got %d", count)
+	}
+}
+
+func TestPaymentRepository_ListReconcileCandidates(t *testing.T) {
+	db, mock := newMockDB(t)
+	repo := NewPaymentRepository(db)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	p := samplePayment()
+
+	// Pending rows are windowed by created_at, expired ones by expires_at,
+	// each with its own window.
+	mock.ExpectQuery(`(?s)FROM payments p.*p.environment = \$1.*COALESCE\(p.provider_reference, ''\) <> ''.*p.status = \$2 AND p.created_at >= \$3.*p.status = \$4 AND p.expires_at >= \$5.*NOT EXISTS.*webhook_events w.*w.processing_error LIKE 'amount_mismatch%'.*ORDER BY p.created_at DESC, p.id DESC\s+LIMIT \$6`).
+		WithArgs(payment.EnvironmentProduction, payment.StatusPending, now.Add(-24*time.Hour), payment.StatusExpired, now.Add(-6*time.Hour), 50).
+		WillReturnRows(sqlmock.NewRows(paymentCols).AddRow(paymentRow(p)...))
+
+	got, err := repo.ListReconcileCandidates(context.Background(), now, 24*time.Hour, 6*time.Hour, 50, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != p.ID {
+		t.Fatalf("expected the one candidate, got %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestPaymentRepository_ListReconcileCandidates_WithCursor(t *testing.T) {
+	db, mock := newMockDB(t)
+	repo := NewPaymentRepository(db)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	p := samplePayment()
+	cursor := &payment.ReconcileCursor{CreatedAt: now.Add(-time.Hour), ID: uuid.New()}
+
+	mock.ExpectQuery(`(?s)FROM payments p.*NOT EXISTS.*\(p.created_at, p.id\) < \(\$7, \$8\).*ORDER BY p.created_at DESC, p.id DESC\s+LIMIT \$6`).
+		WithArgs(payment.EnvironmentProduction, payment.StatusPending, now.Add(-24*time.Hour), payment.StatusExpired, now.Add(-6*time.Hour), 2, cursor.CreatedAt, cursor.ID).
+		WillReturnRows(sqlmock.NewRows(paymentCols).AddRow(paymentRow(p)...))
+
+	got, err := repo.ListReconcileCandidates(context.Background(), now, 24*time.Hour, 6*time.Hour, 2, cursor)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != p.ID {
+		t.Fatalf("expected the one candidate, got %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// A row error mid-iteration must surface, not come back as a short (or
+// empty) list the expire job would silently accept.
+func TestPaymentRepository_ListExpiredPending_RowError(t *testing.T) {
+	db, mock := newMockDB(t)
+	repo := NewPaymentRepository(db)
+	before := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery(`(?s)FROM payments\s+WHERE status = \$1 AND expires_at < \$2\s+ORDER BY expires_at ASC\s+LIMIT \$3`).
+		WithArgs(payment.StatusPending, before, 200).
+		WillReturnRows(sqlmock.NewRows(paymentCols).AddRow(paymentRow(samplePayment())...).RowError(0, errors.New("connection reset")))
+
+	if _, err := repo.ListExpiredPending(context.Background(), before, 200); err == nil {
+		t.Fatal("expected the row error to be returned")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }

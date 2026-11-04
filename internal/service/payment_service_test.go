@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
@@ -209,5 +210,107 @@ func TestCreatePayment_ValidationErrorDoesNotPersist(t *testing.T) {
 	}
 	if len(paymentRepo.byID) != 0 {
 		t.Errorf("expected no payment to be persisted on validation failure")
+	}
+}
+
+// A merchant config that only lists the sandbox mock must fail cleanly:
+// sandbox is never a production route, and an empty candidate list must
+// not reach the nil provider-response dereference.
+func TestCreatePayment_Production_SandboxOnlyMerchantConfig_NotAvailable(t *testing.T) {
+	svc, _, configRepo, router := newTestPaymentService()
+	router.RegisterProvider(&fakeProvider{name: "sandbox"})
+	merchantID := uuid.New()
+	configRepo.configs = []*domainProvider.MerchantProviderConfig{
+		{MerchantID: merchantID, ProviderName: "sandbox", PaymentMethod: "qris", IsEnabled: true, FailoverEnabled: true},
+	}
+	req := baseCreateRequest(merchantID)
+	req.Environment = payment.EnvironmentProduction
+
+	_, err := svc.CreatePayment(context.Background(), req)
+	if !errors.Is(err, providerPkg.ErrProviderNotAvailable) {
+		t.Fatalf("expected ErrProviderNotAvailable, got %v", err)
+	}
+}
+
+func TestCreatePayment_Production_SandboxOnlyDefaultRoute_NotAvailable(t *testing.T) {
+	svc, _, _, router := newTestPaymentService()
+	router.RegisterProvider(&fakeProvider{name: "sandbox"})
+	router.RegisterPaymentMethodProvider("qris", "sandbox")
+	req := baseCreateRequest(uuid.New())
+	req.Environment = payment.EnvironmentProduction
+
+	_, err := svc.CreatePayment(context.Background(), req)
+	if !errors.Is(err, providerPkg.ErrProviderNotAvailable) {
+		t.Fatalf("expected ErrProviderNotAvailable, got %v", err)
+	}
+}
+
+// A provider that returns a response together with an error is a failed
+// attempt: the response must not be persisted as a payment.
+func TestCreatePayment_Production_ResponseWithError_NotPersisted(t *testing.T) {
+	svc, paymentRepo, configRepo, router := newTestPaymentService()
+	bad := &fakeProvider{name: "cashi", createRaw: func() (*domainProvider.ProviderPaymentResponse, error) {
+		return &domainProvider.ProviderPaymentResponse{ProviderReference: "X", ProviderName: "cashi", Status: "pending"}, providerPkg.ErrProviderAPIError
+	}}
+	router.RegisterProvider(bad)
+	merchantID := uuid.New()
+	configRepo.configs = []*domainProvider.MerchantProviderConfig{
+		{MerchantID: merchantID, ProviderName: "cashi", PaymentMethod: "qris", IsEnabled: true, FailoverEnabled: false},
+	}
+	req := baseCreateRequest(merchantID)
+	req.Environment = payment.EnvironmentProduction
+
+	_, err := svc.CreatePayment(context.Background(), req)
+	if !errors.Is(err, providerPkg.ErrProviderAPIError) {
+		t.Fatalf("expected ErrProviderAPIError, got %v", err)
+	}
+	if len(paymentRepo.byID) != 0 {
+		t.Fatalf("expected no persisted payment, got %d", len(paymentRepo.byID))
+	}
+}
+
+func TestCreatePayment_Production_NilResponseNilError_NoPanic(t *testing.T) {
+	svc, _, configRepo, router := newTestPaymentService()
+	bad := &fakeProvider{name: "cashi", createRaw: func() (*domainProvider.ProviderPaymentResponse, error) {
+		return nil, nil
+	}}
+	router.RegisterProvider(bad)
+	merchantID := uuid.New()
+	configRepo.configs = []*domainProvider.MerchantProviderConfig{
+		{MerchantID: merchantID, ProviderName: "cashi", PaymentMethod: "qris", IsEnabled: true, FailoverEnabled: false},
+	}
+	req := baseCreateRequest(merchantID)
+	req.Environment = payment.EnvironmentProduction
+	req.UseCustomMerchantName = true
+
+	if _, err := svc.CreatePayment(context.Background(), req); err == nil {
+		t.Fatal("expected error for nil provider response")
+	}
+}
+
+// " Sandbox " must not slip past the sandbox filter via whitespace/case;
+// production must fall through to cashi and never call the sandbox mock.
+func TestCreatePayment_Production_WhitespaceSandboxConfig_Skipped(t *testing.T) {
+	svc, _, configRepo, router := newTestPaymentService()
+	sandbox := &fakeProvider{name: "sandbox"}
+	cashi := &fakeProvider{name: "cashi"}
+	router.RegisterProvider(sandbox)
+	router.RegisterProvider(cashi)
+	merchantID := uuid.New()
+	configRepo.configs = []*domainProvider.MerchantProviderConfig{
+		{MerchantID: merchantID, ProviderName: " Sandbox ", PaymentMethod: "qris", IsEnabled: true, FailoverEnabled: true},
+		{MerchantID: merchantID, ProviderName: "cashi", PaymentMethod: "qris", IsEnabled: true, FailoverEnabled: true},
+	}
+	req := baseCreateRequest(merchantID)
+	req.Environment = payment.EnvironmentProduction
+
+	if _, err := svc.CreatePayment(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sandbox.createCalls != 0 {
+		t.Fatalf("sandbox must not be called, got %d", sandbox.createCalls)
+	}
+	if cashi.createCalls != 1 {
+		t.Fatalf("expected cashi called once, got %d", cashi.createCalls)
 	}
 }

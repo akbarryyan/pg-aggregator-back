@@ -109,18 +109,25 @@ func (f *fakePaymentRepo) GetByProviderReference(ctx context.Context, providerRe
 	return &cp, nil
 }
 
-func (f *fakePaymentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) error {
+// UpdateStatus mirrors the real repository's guarded update: only allowed
+// source statuses move, and a refused move is explained the same way.
+func (f *fakePaymentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.byID[id]
 	if !ok {
-		return payment.ErrPaymentNotFound
+		return "", payment.ErrPaymentNotFound
 	}
+	if !payment.CanTransitionTo(p.Status, newStatus) {
+		if payment.IsTerminalStatus(p.Status) {
+			return "", payment.ErrPaymentAlreadyTerminal
+		}
+		return "", payment.ErrInvalidStatusTransition
+	}
+	previous := p.Status
 	p.Status = newStatus
-	if paidAt != nil {
-		p.PaidAt = paidAt
-	}
-	return nil
+	p.PaidAt = paidAt
+	return previous, nil
 }
 
 func (f *fakePaymentRepo) List(ctx context.Context, limit, offset int) ([]*payment.Payment, error) {
@@ -183,6 +190,7 @@ type stubProvider struct {
 	name             string
 	fixedProviderRef string
 	webhookStatus    string
+	settledAmount    int64
 }
 
 func (p *stubProvider) GetName() string { return p.name }
@@ -198,6 +206,10 @@ func (p *stubProvider) CreatePayment(ctx context.Context, req *domainProvider.Pr
 }
 
 func (p *stubProvider) GetPaymentStatus(ctx context.Context, providerReference string) (*domainProvider.NormalizedPaymentStatus, error) {
+	if p.settledAmount > 0 {
+		amt := p.settledAmount
+		return &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid, ProviderReference: providerReference, Amount: &amt}, nil
+	}
 	return &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPending, ProviderReference: providerReference}, nil
 }
 
@@ -260,7 +272,7 @@ func TestRouter_CreatePayment_Webhook_StatusPaid_EndToEnd(t *testing.T) {
 	// ---- payment side: in-memory fakes + a stand-in "production" provider ----
 	paymentRepo := newFakePaymentRepo()
 	router := providerPkg.NewProviderRouter()
-	stub := &stubProvider{name: "testprov", fixedProviderRef: "TESTPROV-REF-1", webhookStatus: payment.StatusPaid}
+	stub := &stubProvider{name: "testprov", fixedProviderRef: "TESTPROV-REF-1", webhookStatus: payment.StatusPaid, settledAmount: 75000}
 	router.RegisterProvider(stub)
 	router.RegisterPaymentMethodProvider("qris", "testprov")
 
@@ -549,4 +561,8 @@ func TestRouter_RequestID_WiredForEveryResponse(t *testing.T) {
 	if got := rec2.Header().Get(middleware.RequestIDHeader); got != "client-supplied-id" {
 		t.Errorf("expected client-supplied-id to be echoed back, got %q", got)
 	}
+}
+
+func (f *fakePaymentRepo) ListReconcileCandidates(ctx context.Context, now time.Time, pendingWindow, expiredWindow time.Duration, limit int, after *payment.ReconcileCursor) ([]*payment.Payment, error) {
+	return nil, nil
 }

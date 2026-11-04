@@ -3,11 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
 	"strings"
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
 )
@@ -22,6 +25,7 @@ type AdminMerchantService struct {
 	merchantRepo               *repository.MerchantRepository
 	merchantProviderConfigRepo *repository.MerchantProviderConfigRepository
 	paymentService             *AdminPaymentService
+	providerRegistry           providerRegistry
 }
 
 func NewAdminMerchantService(
@@ -34,6 +38,37 @@ func NewAdminMerchantService(
 		merchantProviderConfigRepo: merchantProviderConfigRepo,
 		paymentService:             paymentService,
 	}
+}
+
+// providerRegistry is the slice of *provider.ProviderRouter needed to check
+// that a merchant provider config names a provider this API can route to.
+type providerRegistry interface {
+	GetProvider(name string) (providerPkg.PaymentProvider, bool)
+}
+
+func (s *AdminMerchantService) WithProviderRegistry(r providerRegistry) *AdminMerchantService {
+	s.providerRegistry = r
+	return s
+}
+
+// validateProviderConfig rejects configs CreatePayment could never use: the
+// sandbox mock (never a production route), providers this API doesn't
+// register, and payment methods it doesn't support.
+func (s *AdminMerchantService) validateProviderConfig(req *provider.UpsertMerchantProviderConfigRequest) error {
+	req.ProviderName = strings.ToLower(strings.TrimSpace(req.ProviderName))
+	req.PaymentMethod = strings.ToLower(strings.TrimSpace(req.PaymentMethod))
+	if req.ProviderName == provider.ProviderSandbox {
+		return provider.ErrProviderConfigSandboxNotAllowed
+	}
+	if req.PaymentMethod != payment.PaymentMethodQRIS {
+		return provider.ErrProviderConfigUnsupportedPaymentMethod
+	}
+	if s.providerRegistry != nil {
+		if _, ok := s.providerRegistry.GetProvider(req.ProviderName); !ok {
+			return provider.ErrProviderConfigUnknownProvider
+		}
+	}
+	return nil
 }
 
 type PaginatedMerchants struct {
@@ -108,6 +143,9 @@ func (s *AdminMerchantService) CreateMerchant(ctx context.Context, req *merchant
 			req.WebhookURL = nil
 		} else {
 			req.WebhookURL = &trimmed
+			if err := netsafe.ValidateCallbackURL(trimmed, false); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -164,6 +202,9 @@ func (s *AdminMerchantService) UpdateMerchant(ctx context.Context, id uuid.UUID,
 			req.WebhookURL = nil
 		} else {
 			req.WebhookURL = &trimmed
+			if err := netsafe.ValidateCallbackURL(trimmed, false); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -219,6 +260,9 @@ func (s *AdminMerchantService) UpsertMerchantProviderConfig(
 		return nil, err
 	}
 	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	if err := s.validateProviderConfig(req); err != nil {
 		return nil, err
 	}
 	if s.merchantProviderConfigRepo == nil {

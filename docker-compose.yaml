@@ -36,6 +36,10 @@ services:
   api:
     image: *api-image
     restart: unless-stopped
+    # Graceful shutdown can take up to 30s (HTTP drain) + 15s (waiting for
+    # background jobs). Docker's default 10s would SIGKILL an in-flight
+    # merchant callback send before its result is recorded.
+    stop_grace_period: 50s
     volumes:
       - ./.config.toml:/app/.config.toml:ro
     networks:

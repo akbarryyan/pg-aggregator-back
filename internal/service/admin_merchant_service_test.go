@@ -3,12 +3,15 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
 )
@@ -272,4 +275,66 @@ func TestAdminMerchantService_ListMerchantPayments(t *testing.T) {
 	if result.Total != 1 {
 		t.Fatalf("expected total 1, got %d", result.Total)
 	}
+}
+
+func TestAdminMerchantService_UpsertMerchantProviderConfig_RejectsInvalid(t *testing.T) {
+	cases := []struct {
+		name    string
+		req     provider.UpsertMerchantProviderConfigRequest
+		wantErr error
+	}{
+		{"sandbox provider", provider.UpsertMerchantProviderConfigRequest{ProviderName: "sandbox", PaymentMethod: "qris"}, provider.ErrProviderConfigSandboxNotAllowed},
+		{"unknown provider", provider.UpsertMerchantProviderConfigRequest{ProviderName: "xendit", PaymentMethod: "qris"}, provider.ErrProviderConfigUnknownProvider},
+		{"unsupported method", provider.UpsertMerchantProviderConfigRequest{ProviderName: "cashi", PaymentMethod: "va"}, provider.ErrProviderConfigUnsupportedPaymentMethod},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, mock := newAdminMerchantServiceWithMock(t)
+			router := providerPkg.NewProviderRouter()
+			router.RegisterProvider(&fakeProvider{name: "cashi"})
+			svc = svc.WithProviderRegistry(router)
+			now := time.Now()
+			id := uuid.New()
+			mock.ExpectQuery(`SELECT .* FROM merchants\s+WHERE id = \$1`).
+				WithArgs(id).
+				WillReturnRows(sqlmock.NewRows([]string{
+					"id", "name", "email", "phone", "business_name", "webhook_url", "webhook_secret", "is_active", "created_at", "updated_at",
+				}).AddRow(id, "Acme", "a@example.com", "", "Acme Biz", nil, nil, true, now, now))
+
+			req := tc.req
+			_, err := svc.UpsertMerchantProviderConfig(context.Background(), id, &req)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected %v, got %v", tc.wantErr, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unexpected SQL: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdminMerchantService_WebhookURLValidation(t *testing.T) {
+	bad := "http://10.0.0.5/hook"
+	t.Run("create rejects", func(t *testing.T) {
+		svc, mock := newAdminMerchantServiceWithMock(t)
+		_, err := svc.CreateMerchant(context.Background(), &merchant.CreateMerchantRequest{
+			Name: "Acme", Email: "a@example.com", BusinessName: "Acme", WebhookURL: &bad,
+		})
+		if !errors.Is(err, netsafe.ErrInvalidCallbackURL) {
+			t.Fatalf("want ErrInvalidCallbackURL, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unexpected SQL: %v", err)
+		}
+	})
+	t.Run("update rejects", func(t *testing.T) {
+		svc, mock := newAdminMerchantServiceWithMock(t)
+		_, err := svc.UpdateMerchant(context.Background(), uuid.New(), &merchant.UpdateMerchantRequest{WebhookURL: &bad})
+		if !errors.Is(err, netsafe.ErrInvalidCallbackURL) {
+			t.Fatalf("want ErrInvalidCallbackURL, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unexpected SQL: %v", err)
+		}
+	})
 }

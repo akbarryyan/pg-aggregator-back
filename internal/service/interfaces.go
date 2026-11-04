@@ -22,9 +22,10 @@ type paymentRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*payment.Payment, error)
 	GetByReference(ctx context.Context, reference string) (*payment.Payment, error)
 	GetByProviderReference(ctx context.Context, providerReference string) (*payment.Payment, error)
-	UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) error
+	UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) (string, error)
 	List(ctx context.Context, limit, offset int) ([]*payment.Payment, error)
 	ListExpiredPending(ctx context.Context, before time.Time, limit int) ([]*payment.Payment, error)
+	ListReconcileCandidates(ctx context.Context, now time.Time, pendingWindow, expiredWindow time.Duration, limit int, after *payment.ReconcileCursor) ([]*payment.Payment, error)
 	ListByPaymentLinkID(ctx context.Context, linkID uuid.UUID, limit, offset int) ([]*payment.Payment, error)
 	CountByPaymentLinkID(ctx context.Context, linkID uuid.UUID) (int, error)
 	ListAdmin(
@@ -63,7 +64,19 @@ type merchantCallbackRepository interface {
 	Create(ctx context.Context, d *merchant.CallbackDelivery) error
 	GetByID(ctx context.Context, id uuid.UUID) (*merchant.CallbackDelivery, error)
 	UpdateResult(ctx context.Context, d *merchant.CallbackDelivery) error
-	ListDueForRetry(ctx context.Context, before time.Time, limit int) ([]merchant.CallbackDelivery, error)
+	// ClaimDue marks up to limit pending deliveries (plus 'sending' ones
+	// untouched for staleAfter, left by a dead worker) as 'sending' and
+	// returns them, so concurrent workers never send the same row twice.
+	ClaimDue(ctx context.Context, now time.Time, limit int, staleAfter time.Duration) ([]merchant.CallbackDelivery, error)
+	// RequeueDueFailed turns failed deliveries whose retry time has come into
+	// new pending attempts and clears their schedule; returns how many.
+	RequeueDueFailed(ctx context.Context, now time.Time, limit int) (int64, error)
+	// ClearRetrySchedule nulls next_retry_at on a failed row that still has
+	// one (and touches nothing else); reports whether a row changed.
+	ClearRetrySchedule(ctx context.Context, id uuid.UUID, now time.Time) (bool, error)
+	// ReleaseClaimed puts the given rows back to 'pending' if they are still
+	// 'sending' (claimed but never sent); returns how many.
+	ReleaseClaimed(ctx context.Context, ids []uuid.UUID, now time.Time) (int64, error)
 }
 
 type paymentLinkRepository interface {

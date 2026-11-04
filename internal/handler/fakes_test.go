@@ -85,18 +85,25 @@ func (f *fakePaymentRepo) GetByProviderReference(ctx context.Context, providerRe
 	return &cp, nil
 }
 
-func (f *fakePaymentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) error {
+// UpdateStatus mirrors the real repository's guarded update: only allowed
+// source statuses move, and a refused move is explained the same way.
+func (f *fakePaymentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.byID[id]
 	if !ok {
-		return payment.ErrPaymentNotFound
+		return "", payment.ErrPaymentNotFound
 	}
+	if !payment.CanTransitionTo(p.Status, newStatus) {
+		if payment.IsTerminalStatus(p.Status) {
+			return "", payment.ErrPaymentAlreadyTerminal
+		}
+		return "", payment.ErrInvalidStatusTransition
+	}
+	previous := p.Status
 	p.Status = newStatus
-	if paidAt != nil {
-		p.PaidAt = paidAt
-	}
-	return nil
+	p.PaidAt = paidAt
+	return previous, nil
 }
 
 func (f *fakePaymentRepo) List(ctx context.Context, limit, offset int) ([]*payment.Payment, error) {
@@ -183,6 +190,9 @@ type fakeProvider struct {
 	validateErr  error
 	parsePayload *domainProvider.ProviderWebhookPayload
 	parseErr     error
+
+	statusResp *domainProvider.NormalizedPaymentStatus
+	statusErr  error
 }
 
 func (f *fakeProvider) GetName() string { return f.name }
@@ -205,6 +215,13 @@ func (f *fakeProvider) CreatePayment(ctx context.Context, req *domainProvider.Pr
 }
 
 func (f *fakeProvider) GetPaymentStatus(ctx context.Context, providerReference string) (*domainProvider.NormalizedPaymentStatus, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+	if f.statusResp != nil {
+		resp := *f.statusResp
+		return &resp, nil
+	}
 	return &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPending, ProviderReference: providerReference}, nil
 }
 
@@ -411,5 +428,9 @@ func (f *fakeMerchantUserRepo) UpdatePasswordHash(ctx context.Context, id uuid.U
 }
 
 func (f *fakeMerchantUserRepo) Create(ctx context.Context, u *merchant.User) (*merchant.User, error) {
+	return nil, nil
+}
+
+func (f *fakePaymentRepo) ListReconcileCandidates(ctx context.Context, now time.Time, pendingWindow, expiredWindow time.Duration, limit int, after *payment.ReconcileCursor) ([]*payment.Payment, error) {
 	return nil, nil
 }

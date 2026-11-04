@@ -1,6 +1,8 @@
 package payment
 
 import (
+	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,6 +54,13 @@ type Payment struct {
 	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
 }
 
+// ReconcileCursor is a keyset position in the reconcile candidate order
+// (created_at DESC, id DESC): the next batch starts strictly after it.
+type ReconcileCursor struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
+}
+
 type CreatePaymentRequest struct {
 	MerchantID       uuid.UUID `json:"merchant_id"`
 	Amount           int64     `json:"amount"`
@@ -92,6 +101,23 @@ func NormalizeEnvironment(raw string) string {
 	}
 }
 
+// ParseEnvironment resolves the environment for anything being created
+// (payments, payment links). An empty value means sandbox: a missing or
+// mistyped environment must never silently charge real money through the
+// production provider. Unknown values are rejected rather than guessed.
+// NormalizeEnvironment stays for read/filter paths, whose existing
+// "empty = production" behavior dashboards rely on.
+func ParseEnvironment(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", EnvironmentSandbox, "test", "dev", "development":
+		return EnvironmentSandbox, nil
+	case EnvironmentProduction, "prod", "live":
+		return EnvironmentProduction, nil
+	default:
+		return "", ErrInvalidEnvironment
+	}
+}
+
 func (r *CreatePaymentRequest) Validate() error {
 	if r.Amount <= 0 {
 		return ErrInvalidAmount
@@ -129,7 +155,26 @@ func (r *CreatePaymentRequest) Validate() error {
 		return ErrInvalidExpiration
 	}
 
-	r.Environment = NormalizeEnvironment(r.Environment)
+	env, err := ParseEnvironment(r.Environment)
+	if err != nil {
+		return err
+	}
+	r.Environment = env
+
+	if r.CallbackURL != nil {
+		trimmed := strings.TrimSpace(*r.CallbackURL)
+		if trimmed == "" {
+			r.CallbackURL = nil
+		} else {
+			// Sandbox payments may use plain http (tunnels, test servers);
+			// the IP rules still apply to them — our server can't reach a
+			// merchant's localhost, and allowing it would be SSRF.
+			if err := netsafe.ValidateCallbackURL(trimmed, r.Environment == EnvironmentSandbox); err != nil {
+				return err
+			}
+			r.CallbackURL = &trimmed
+		}
+	}
 
 	return nil
 }
@@ -222,18 +267,29 @@ func IsValidStatus(status string) bool {
 	return false
 }
 
+// AllowedSourceStatuses lists the statuses a payment may move to newStatus
+// from. pending can go to any outcome; the only way out of an outcome is
+// expired → paid, for a settlement the provider reports after the payment
+// already expired locally — the customer really paid. Only
+// provider-reported settlements (a verified webhook or reconcile) ever write
+// paid; there is no manual "mark paid" path, so this cannot revive an
+// abandoned payment on its own.
+func AllowedSourceStatuses(newStatus string) []string {
+	switch newStatus {
+	case StatusPaid:
+		return []string{StatusPending, StatusExpired}
+	case StatusExpired, StatusFailed, StatusCancelled:
+		return []string{StatusPending}
+	default:
+		return nil
+	}
+}
+
 func CanTransitionTo(currentStatus, newStatus string) bool {
-	if currentStatus == newStatus {
-		return false
+	for _, s := range AllowedSourceStatuses(newStatus) {
+		if s == currentStatus {
+			return true
+		}
 	}
-
-	if IsTerminalStatus(currentStatus) {
-		return false
-	}
-
-	if currentStatus == StatusPending {
-		return newStatus == StatusPaid || newStatus == StatusExpired || newStatus == StatusFailed || newStatus == StatusCancelled
-	}
-
 	return false
 }

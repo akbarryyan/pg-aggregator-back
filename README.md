@@ -191,9 +191,9 @@ go test ./... -race    # + race detector (dipakai di CI)
 
 CI (`.github/workflows/ci.yml`) menjalankan `go vet`, `go test -race`, dan
 `go build` di tiap push/PR ke `main` — tanpa service Postgres, karena semua
-test di bawah ini hermetic.
+test di bawah ini hermetic (kecuali test PostgreSQL opt-in, yang di-skip tanpa `TEST_DATABASE_URL`).
 
-Tiga gaya test dipakai tergantung layer:
+Beberapa gaya test dipakai tergantung layer:
 
 - **`domain/*`, `service`, `provider`, `middleware`, `scheduler`** — `go
   test` standar + fakes manual in-memory (lihat
@@ -202,6 +202,19 @@ Tiga gaya test dipakai tergantung layer:
   memvalidasi SQL & scanning nyata (termasuk urutan `$N` pada query
   filter dinamis) tanpa Postgres sungguhan. Lihat
   `repository/payment_repository_test.go` untuk polanya.
+- **`repository` (PostgreSQL nyata, opt-in)** —
+  `repository/payment_repository_pg_test.go` membuktikan locking/`RETURNING`
+  `UpdateStatus` dan keyset reconcile yang tidak bisa dibuktikan sqlmock.
+  Hanya jalan bila `TEST_DATABASE_URL` di-set (selain itu di-skip): isi
+  dengan DSN berformat URL ke database sekali-pakai yang usernya boleh
+  `CREATE SCHEMA`. Tiap test membuat schema unik, menerapkan
+  `migrations/*.sql`, lalu men-drop schema-nya. Contoh (kredensial hanya
+  placeholder):
+
+  ```bash
+  TEST_DATABASE_URL='postgres://user:pass@localhost:5432/whuzpay_test?sslmode=disable' \
+    go test ./internal/repository/ -run PG -v
+  ```
 - **`handler`** — `httptest` + service nyata yang di-wire ke fakes (bukan
   mock request/response), mencakup jalur create-payment, webhook, dan
   auth (admin & merchant).
@@ -217,9 +230,37 @@ Tiga gaya test dipakai tergantung layer:
 Dijalankan sebagai goroutine ticker in-process di `main.go`
 (`internal/scheduler`), bukan Redis/Asynq — cukup untuk single-instance:
 
-- `expire-payments` (tiap 1 menit) — expire payment yang lewat deadline
-- `retry-merchant-callbacks` (tiap 1 menit) — retry callback merchant yang gagal
+- `expire-payments` (tiap 1 menit) — expire payment `pending` yang lewat
+  deadline lebih dari 5 menit (masa tenggang, supaya pembayaran di detik
+  terakhir tidak dilaporkan `expired` lalu `paid`), dan mengantre callback
+  `payment.expired` ke merchant
+- `reconcile-payments` (tiap 2 menit) — cek ulang payment produksi
+  `pending` yang dibuat ≤24 jam lalu dan `expired` yang deadline-nya lewat
+  ≤6 jam lalu ke check-status provider (verifikasi nominal); jaring pengaman
+  bila webhook hilang. Tiap run memeriksa ≤50 kandidat (terbaru dulu)
+  dengan kursor `(created_at, id)` in-memory yang berputar, sehingga
+  seluruh kandidat tercakup tiap ⌈N/50⌉ run; restart mulai lagi dari yang
+  terbaru
+- `deliver-merchant-callbacks` (tiap 5 detik) — kirim callback merchant yang
+  antre dan jadwalkan ulang yang gagal
 - `rate-limiter-cleanup` (tiap 10 menit) — bersihkan bucket rate limit idle
+
+Saat shutdown, server menunggu job yang sedang berjalan selesai (maks. 15
+detik) sebelum keluar.
+
+**Jaminan pengiriman callback merchant: at-least-once.** Callback bisa
+diterima lebih dari sekali (proses mati di tengah kirim, hasil kirim gagal
+dicatat, retry manual admin, atau delivery yang masuk jendela stale lalu
+diklaim ulang); merchant harus men-deduplikasi berdasarkan (`payment_id`,
+`event`). Callback hanya hilang bila pengantreannya sendiri gagal, dan itu
+dicatat di log (selain gagal permanen yang tercatat: URL tidak valid/terblokir,
+atau batas 5 percobaan). `webhook_url` merchant **selalu** `https` dengan host
+publik; hanya `callback_url` sebuah payment yang boleh `http` biasa, dan hanya
+di sandbox. Domain kita sendiri (`app.url` dan `app.frontend_url`, termasuk
+subdomainnya) ditolak sebagai tujuan callback. Retry manual admin memakai URL
+**terkini** (`callback_url` payment, lalu `webhook_url` merchant; URL tersimpan
+bila keduanya kosong). Indeks antrean ada di migration `016`. Redirect (3xx) tidak diikuti dan dihitung gagal, jadi merchant harus
+mendaftarkan URL final. Detail: [docs/payment-state-machine.md](docs/payment-state-machine.md#callback-merchant).
 
 ## Architecture Principles
 

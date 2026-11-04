@@ -153,6 +153,9 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 
 	p, err := h.paymentService.CreatePayment(r.Context(), &req)
 	if err != nil {
+		if respondInvalidCallbackURL(w, err) {
+			return
+		}
 		switch err {
 		case payment.ErrInvalidAmount,
 			payment.ErrUnsupportedCurrency,
@@ -160,7 +163,8 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 			payment.ErrUnsupportedPaymentMethod,
 			payment.ErrMerchantIDRequired,
 			payment.ErrDescriptionRequired,
-			payment.ErrInvalidExpiration:
+			payment.ErrInvalidExpiration,
+			payment.ErrInvalidEnvironment:
 			respondError(w, http.StatusBadRequest, err.Error())
 		default:
 			logger.ErrorfCtx(r.Context(), "Failed to create payment from admin: %v", err)
@@ -311,6 +315,9 @@ func (h *AdminHandler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
 
 	created, err := h.adminMerchantService.CreateMerchant(r.Context(), &req)
 	if err != nil {
+		if respondInvalidCallbackURL(w, err) {
+			return
+		}
 		switch err {
 		case merchant.ErrMerchantNameRequired,
 			merchant.ErrMerchantEmailRequired,
@@ -415,6 +422,9 @@ func (h *AdminHandler) UpdateMerchant(w http.ResponseWriter, r *http.Request) {
 
 	m, err := h.adminMerchantService.UpdateMerchant(r.Context(), id, &req)
 	if err != nil {
+		if respondInvalidCallbackURL(w, err) {
+			return
+		}
 		switch err {
 		case merchant.ErrMerchantNotFound:
 			respondError(w, http.StatusNotFound, "Merchant not found")
@@ -541,7 +551,10 @@ func (h *AdminHandler) UpsertMerchantProviderConfig(w http.ResponseWriter, r *ht
 		case merchant.ErrMerchantNotFound:
 			respondError(w, http.StatusNotFound, "Merchant not found")
 		case domainProvider.ErrProviderConfigProviderRequired,
-			domainProvider.ErrProviderConfigPaymentMethodRequired:
+			domainProvider.ErrProviderConfigPaymentMethodRequired,
+			domainProvider.ErrProviderConfigSandboxNotAllowed,
+			domainProvider.ErrProviderConfigUnknownProvider,
+			domainProvider.ErrProviderConfigUnsupportedPaymentMethod:
 			respondError(w, http.StatusBadRequest, err.Error())
 		default:
 			logger.ErrorfCtx(r.Context(), "Failed to upsert merchant provider config: %v", err)

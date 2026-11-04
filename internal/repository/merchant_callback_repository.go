@@ -10,6 +10,7 @@ import (
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 type MerchantCallbackRepository struct {
@@ -139,39 +140,6 @@ func (r *MerchantCallbackRepository) ListFiltered(
 			return nil, err
 		}
 		items = append(items, *item)
-	}
-	return items, rows.Err()
-}
-
-// ListDueForRetry returns failed deliveries whose next_retry_at has passed.
-// Deliveries with next_retry_at = NULL (retry cap already reached, see
-// executeCallbackDelivery) are excluded automatically since NULL <= $1 is
-// never true in SQL.
-func (r *MerchantCallbackRepository) ListDueForRetry(ctx context.Context, before time.Time, limit int) ([]merchant.CallbackDelivery, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, payment_id, merchant_id, event_type, target_url, request_payload,
-		       attempt_number, status, http_status, response_body, error_message,
-		       delivered_at, next_retry_at, created_at, updated_at
-		FROM merchant_callback_deliveries
-		WHERE status = $1 AND next_retry_at IS NOT NULL AND next_retry_at <= $2
-		ORDER BY next_retry_at ASC
-		LIMIT $3
-	`, merchant.CallbackStatusFailed, before, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list due callback retries: %w", err)
-	}
-	defer rows.Close()
-
-	items := make([]merchant.CallbackDelivery, 0)
-	for rows.Next() {
-		d, err := scanCallbackDelivery(rows)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, *d)
 	}
 	return items, rows.Err()
 }
@@ -337,4 +305,123 @@ func scanCallbackDeliveryRow(rows *sql.Rows) (*CallbackDeliveryRow, error) {
 		MerchantName: merchantName,
 		Reference:    reference,
 	}, nil
+}
+
+// ClaimDue atomically takes up to limit deliveries to send: pending ones,
+// plus 'sending' ones whose worker evidently died (untouched for staleAfter).
+// FOR UPDATE SKIP LOCKED means two workers never claim the same row.
+func (r *MerchantCallbackRepository) ClaimDue(ctx context.Context, now time.Time, limit int, staleAfter time.Duration) ([]merchant.CallbackDelivery, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		UPDATE merchant_callback_deliveries
+		SET status = $1, updated_at = $2
+		WHERE id IN (
+			SELECT id FROM merchant_callback_deliveries
+			WHERE status = $3 OR (status = $1 AND updated_at <= $4)
+			ORDER BY created_at
+			LIMIT $5
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, payment_id, merchant_id, event_type, target_url, request_payload,
+		          attempt_number, status, http_status, response_body, error_message,
+		          delivered_at, next_retry_at, created_at, updated_at
+	`, merchant.CallbackStatusSending, now, merchant.CallbackStatusPending, now.Add(-staleAfter), limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to claim callback deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]merchant.CallbackDelivery, 0)
+	for rows.Next() {
+		d, err := scanCallbackDelivery(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *d)
+	}
+	return items, rows.Err()
+}
+
+// RequeueDueFailed turns each failed delivery whose retry time has come into
+// a fresh pending attempt (attempt_number + 1, history kept) and clears the
+// old row's schedule so it is never picked up twice — one statement, so
+// concurrent workers cannot both requeue the same failure.
+func (r *MerchantCallbackRepository) RequeueDueFailed(ctx context.Context, now time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	res, err := r.db.ExecContext(ctx, `
+		WITH due AS (
+			SELECT id FROM merchant_callback_deliveries
+			WHERE status = $1 AND next_retry_at IS NOT NULL AND next_retry_at <= $2
+			ORDER BY next_retry_at
+			LIMIT $3
+			FOR UPDATE SKIP LOCKED
+		), cleared AS (
+			UPDATE merchant_callback_deliveries d
+			SET next_retry_at = NULL, updated_at = $2
+			FROM due
+			WHERE d.id = due.id
+			RETURNING d.payment_id, d.merchant_id, d.event_type, d.target_url, d.request_payload, d.attempt_number
+		)
+		INSERT INTO merchant_callback_deliveries (
+			id, payment_id, merchant_id, event_type, target_url, request_payload,
+			attempt_number, status, created_at, updated_at
+		)
+		SELECT gen_random_uuid(), payment_id, merchant_id, event_type, target_url, request_payload,
+		       attempt_number + 1, $4, $2, $2
+		FROM cleared
+	`, merchant.CallbackStatusFailed, now, limit, merchant.CallbackStatusPending)
+	if err != nil {
+		return 0, fmt.Errorf("failed to requeue failed callbacks: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// ClearRetrySchedule stops the worker from auto-requeueing a failed delivery
+// (used before a manual retry sends its own new attempt). It only touches a
+// failed row that still has a schedule, and only that column, so it can never
+// overwrite a status or result written concurrently. Reports whether a row
+// changed.
+func (r *MerchantCallbackRepository) ClearRetrySchedule(ctx context.Context, id uuid.UUID, now time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE merchant_callback_deliveries
+		SET next_retry_at = NULL, updated_at = $2
+		WHERE id = $1 AND status = $3 AND next_retry_at IS NOT NULL
+	`, id, now, merchant.CallbackStatusFailed)
+	if err != nil {
+		return false, fmt.Errorf("failed to clear callback retry schedule: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to clear callback retry schedule: %w", err)
+	}
+	return n > 0, nil
+}
+
+// ReleaseClaimed hands claimed-but-unsent deliveries back to 'pending' (a
+// worker stopping early: batch budget spent, or shutdown) so they are sent on
+// the next tick instead of after the stale window. Only rows still 'sending'
+// change, so a row another worker or a manual retry has since finished is
+// left alone. Reports how many rows were released.
+func (r *MerchantCallbackRepository) ReleaseClaimed(ctx context.Context, ids []uuid.UUID, now time.Time) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// As strings: pq.Array can't encode uuid.UUID (a [16]byte) elements.
+	strs := make([]string, len(ids))
+	for i, id := range ids {
+		strs[i] = id.String()
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE merchant_callback_deliveries
+		SET status = $3, updated_at = $2
+		WHERE id = ANY($1::uuid[]) AND status = $4
+	`, pq.Array(strs), now, merchant.CallbackStatusPending, merchant.CallbackStatusSending)
+	if err != nil {
+		return 0, fmt.Errorf("failed to release claimed callbacks: %w", err)
+	}
+	return res.RowsAffected()
 }

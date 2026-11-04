@@ -37,6 +37,7 @@ func newTestWebhookService(fp *fakeProvider) (*service.PaymentService, *fakePaym
 
 func TestWebhookHandler_HandleProviderWebhook_Success(t *testing.T) {
 	providerRef := "PROV-REF-1"
+	amount := int64(50000)
 	fp := &fakeProvider{
 		name: "testprov",
 		parsePayload: &domainProvider.ProviderWebhookPayload{
@@ -44,6 +45,7 @@ func TestWebhookHandler_HandleProviderWebhook_Success(t *testing.T) {
 			ProviderReference: providerRef,
 			Status:            "paid",
 		},
+		statusResp: &domainProvider.NormalizedPaymentStatus{Status: "paid", Amount: &amount},
 	}
 	svc, paymentRepo := newTestWebhookService(fp)
 
@@ -104,40 +106,63 @@ func TestWebhookHandler_HandleProviderWebhook_InvalidSignatureRejected(t *testin
 	}
 }
 
-// TestWebhookHandler_HandleProviderWebhook_DuplicateIsIgnoredNot400 verifies
-// the idempotency behavior explicitly carved out in webhook_handler.go: a
-// duplicate/already-terminal webhook must respond 200 "ignored", not an
-// error, since providers retry webhooks and a 4xx/5xx would trigger more
-// retries.
-func TestWebhookHandler_HandleProviderWebhook_DuplicateIsIgnoredNot400(t *testing.T) {
-	providerRef := "PROV-REF-DUP"
-	fp := &fakeProvider{
-		name: "testprov",
-		parsePayload: &domainProvider.ProviderWebhookPayload{
-			ProviderName:      "testprov",
-			ProviderReference: providerRef,
-			Status:            "pending", // same as seeded status → duplicate webhook
-		},
+// TestWebhookHandler_HandleProviderWebhook_AcknowledgedAsIgnored covers the
+// outcomes webhook_handler.go deliberately answers 200 "ignored" instead of
+// an error: providers retry on 4xx/5xx, and none of these is fixed by a
+// retry. The payment must stay pending in every case.
+func TestWebhookHandler_HandleProviderWebhook_AcknowledgedAsIgnored(t *testing.T) {
+	cases := []struct {
+		name          string
+		webhookStatus string
+		webhookAmount *int64
+		providerAmt   int64
+	}{
+		// ErrWebhookIgnored: only a settlement can move a payment.
+		{"non-settlement event", "pending", nil, 50000},
+		// ErrWebhookAmountMismatch: provider confirms 50000, webhook claims 1.
+		{"webhook-only amount mismatch", "paid", int64Ptr(1), 50000},
+		// ErrAmountMismatch: provider itself reports another amount.
+		{"provider amount mismatch", "paid", nil, 49000},
 	}
-	svc, paymentRepo := newTestWebhookService(fp)
-	seedPendingPayment(t, paymentRepo, "testprov", providerRef)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			providerRef := "PROV-REF-IGN"
+			fp := &fakeProvider{
+				name: "testprov",
+				parsePayload: &domainProvider.ProviderWebhookPayload{
+					ProviderName:      "testprov",
+					ProviderReference: providerRef,
+					Status:            tc.webhookStatus,
+					Amount:            tc.webhookAmount,
+				},
+				statusResp: &domainProvider.NormalizedPaymentStatus{Status: "paid", Amount: int64Ptr(tc.providerAmt)},
+			}
+			svc, paymentRepo := newTestWebhookService(fp)
+			p := seedPendingPayment(t, paymentRepo, "testprov", providerRef)
 
-	h := NewWebhookHandler(svc)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/provider-webhooks/testprov", strings.NewReader(`{}`))
-	req = mux.SetURLVars(req, map[string]string{"providerName": "testprov"})
-	rec := httptest.NewRecorder()
+			h := NewWebhookHandler(svc)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/provider-webhooks/testprov", strings.NewReader(`{}`))
+			req = mux.SetURLVars(req, map[string]string{"providerName": "testprov"})
+			rec := httptest.NewRecorder()
 
-	h.HandleProviderWebhook(rec, req)
+			h.HandleProviderWebhook(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 (ignored), got %d: %s", rec.Code, rec.Body.String())
-	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp["status"] != "ignored" {
-		t.Errorf("expected status=ignored, got %v", resp)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200 (ignored), got %d: %s", rec.Code, rec.Body.String())
+			}
+			var resp map[string]string
+			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+			if resp["status"] != "ignored" {
+				t.Errorf("expected status=ignored, got %v", resp)
+			}
+			if got, _ := paymentRepo.GetByID(context.Background(), p.ID); got.Status != payment.StatusPending {
+				t.Errorf("status = %q, want pending", got.Status)
+			}
+		})
 	}
 }
+
+func int64Ptr(v int64) *int64 { return &v }
 
 func TestWebhookHandler_HandleProviderWebhook_UnknownProvider(t *testing.T) {
 	svc, _ := newTestWebhookService(&fakeProvider{name: "testprov"})
@@ -174,4 +199,55 @@ func seedPendingPayment(t *testing.T, repo *fakePaymentRepo, providerName, provi
 		t.Fatalf("failed to seed payment: %v", err)
 	}
 	return p
+}
+
+func TestWebhookHandler_HandleProviderWebhook_VerificationFailedIs502(t *testing.T) {
+	providerRef := "PROV-REF-502"
+	fp := &fakeProvider{
+		name:         "testprov",
+		parsePayload: &domainProvider.ProviderWebhookPayload{ProviderName: "testprov", ProviderReference: providerRef, Status: "paid"},
+		statusErr:    errors.New("provider down"),
+	}
+	svc, paymentRepo := newTestWebhookService(fp)
+	p := seedPendingPayment(t, paymentRepo, "testprov", providerRef)
+
+	h := NewWebhookHandler(svc)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/provider-webhooks/testprov", strings.NewReader(`{}`))
+	req = mux.SetURLVars(req, map[string]string{"providerName": "testprov"})
+	rec := httptest.NewRecorder()
+	h.HandleProviderWebhook(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := paymentRepo.GetByID(context.Background(), p.ID)
+	if got.Status != payment.StatusPending {
+		t.Errorf("status = %q, want pending", got.Status)
+	}
+}
+
+// A webhook for a payment owned by another provider falls into the default
+// 400 (not "ignored"): it is not a normal provider retry.
+func TestWebhookHandler_HandleProviderWebhook_ProviderMismatchIs400(t *testing.T) {
+	providerRef := "PROV-REF-OWNER"
+	fp := &fakeProvider{
+		name:         "testprov",
+		parsePayload: &domainProvider.ProviderWebhookPayload{ProviderName: "testprov", ProviderReference: providerRef, Status: "paid"},
+		statusResp:   &domainProvider.NormalizedPaymentStatus{Status: "paid", Amount: int64Ptr(50000)},
+	}
+	svc, paymentRepo := newTestWebhookService(fp)
+	p := seedPendingPayment(t, paymentRepo, "cashi", providerRef) // owned by another provider
+
+	h := NewWebhookHandler(svc)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/provider-webhooks/testprov", strings.NewReader(`{}`))
+	req = mux.SetURLVars(req, map[string]string{"providerName": "testprov"})
+	rec := httptest.NewRecorder()
+	h.HandleProviderWebhook(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := paymentRepo.GetByID(context.Background(), p.ID); got.Status != payment.StatusPending {
+		t.Errorf("status = %q, want pending", got.Status)
+	}
 }

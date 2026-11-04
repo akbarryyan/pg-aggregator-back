@@ -1009,6 +1009,28 @@ func TestRetryMerchantCallback_NewURLStillValidated(t *testing.T) {
 	}
 }
 
+// A payment whose merchant row is gone is not an error for a manual retry:
+// there is nothing newer to resolve, so the stored URL is used.
+func TestCurrentCallbackTarget_MerchantNotFoundKeepsStoredURL(t *testing.T) {
+	svc, _, callbackRepo := newCallbackTestService(t)
+	past := time.Now().UTC().Add(-time.Minute)
+	source := seedCallbackDelivery(callbackRepo, merchant.CallbackStatusFailed, "https://old.example.com/h", 1, &past)
+	source.PaymentID = uuid.New()
+	p := &payment.Payment{ID: source.PaymentID, Reference: "PAY-Z", MerchantID: source.MerchantID,
+		Status: payment.StatusPaid, Environment: payment.EnvironmentProduction}
+	if err := svc.paymentRepo.Create(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.currentCallbackTarget(context.Background(), source)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "https://old.example.com/h" {
+		t.Errorf("target = %q, want the stored URL", got)
+	}
+}
+
 // A transient lookup failure must leave everything untouched, so the admin
 // can simply press retry again.
 func TestRetryMerchantCallback_PaymentLookupErrorChangesNothing(t *testing.T) {

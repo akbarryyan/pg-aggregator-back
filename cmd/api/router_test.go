@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -299,6 +300,7 @@ func TestRouter_CreatePayment_Webhook_StatusPaid_EndToEnd(t *testing.T) {
 		paymentHandler, webhookHandler,
 		nil, nil, nil, nil, // authHandler, adminHandler, merchantHandler, paymentLinkHandler — unused routes
 		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
+		func(context.Context) error { return nil },
 	)
 
 	// ---- 1. create payment via the real merchant-API-key-authed route ----
@@ -392,6 +394,7 @@ func TestRouter_CreatePayment_MissingAPIKey_Rejected(t *testing.T) {
 		paymentHandler, webhookHandler,
 		nil, nil, nil, nil,
 		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
+		func(context.Context) error { return nil },
 	)
 
 	body, _ := json.Marshal(map[string]interface{}{
@@ -438,6 +441,7 @@ func TestRouter_LegacyUnauthenticatedProviderRoutingEndpoints_Removed(t *testing
 		paymentHandler, webhookHandler,
 		nil, nil, nil, nil,
 		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
+		func(context.Context) error { return nil },
 	)
 
 	cases := []struct {
@@ -492,6 +496,7 @@ func TestRouter_ChangePassword_RateLimited(t *testing.T) {
 		paymentHandler, webhookHandler,
 		authHandler, nil, nil, nil,
 		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
+		func(context.Context) error { return nil },
 	)
 
 	newReq := func() *http.Request {
@@ -542,6 +547,7 @@ func TestRouter_RequestID_WiredForEveryResponse(t *testing.T) {
 		paymentHandler, webhookHandler,
 		nil, nil, nil, nil,
 		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
+		func(context.Context) error { return nil },
 	)
 
 	// No incoming ID → one must be generated, even for a route that 404s.
@@ -589,6 +595,7 @@ func newLimiterRouter(t *testing.T, publicL, apiL *middleware.IPRateLimiter) htt
 		handler.NewAuthHandler(authService), nil, nil, nil,
 		middleware.NewAuthMiddleware(authService), middleware.NewMerchantAPIAuthMiddleware(service.NewMerchantAPIKeyService(nil, nil)),
 		open, publicL, open, apiL,
+		func(context.Context) error { return nil },
 	)
 }
 
@@ -690,5 +697,40 @@ func TestRouter_AccountRoutes_APILimiterRunsBeforeHandlerAuth(t *testing.T) {
 				t.Fatalf("request past burst: expected 429, got %d", code)
 			}
 		})
+	}
+}
+
+// TestRouter_Health: /api/v1/health goes through the real router, reports the
+// injected readiness check, and sits behind publicRateLimiter.
+func TestRouter_Health(t *testing.T) {
+	build := func(check func(context.Context) error, publicL *middleware.IPRateLimiter) http.Handler {
+		open := middleware.NewIPRateLimiter(1000, 1000)
+		return setupRouter(nil, nil, nil, nil, nil, nil, nil, nil, open, publicL, open, open, check)
+	}
+	get := func(mux http.Handler) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+		req.RemoteAddr = "203.0.113.9:4444"
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	open := func() *middleware.IPRateLimiter { return middleware.NewIPRateLimiter(1000, 1000) }
+
+	if got := get(build(func(context.Context) error { return nil }, open())); got != http.StatusOK {
+		t.Errorf("healthy checker: status = %d, want 200", got)
+	}
+	if got := get(build(func(context.Context) error { return errors.New("db down") }, open())); got != http.StatusServiceUnavailable {
+		t.Errorf("failing checker: status = %d, want 503", got)
+	}
+
+	const burst = 3
+	mux := build(func(context.Context) error { return nil }, middleware.NewIPRateLimiter(1, burst))
+	for i := 1; i <= burst; i++ {
+		if got := get(mux); got != http.StatusOK {
+			t.Fatalf("request %d within burst: status = %d, want 200", i, got)
+		}
+	}
+	if got := get(mux); got != http.StatusTooManyRequests {
+		t.Errorf("request past burst: status = %d, want 429", got)
 	}
 }

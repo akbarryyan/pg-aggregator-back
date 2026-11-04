@@ -13,7 +13,8 @@ import (
 
 // providerVerifyTimeout bounds every check-status call made to confirm a
 // settlement (webhook or reconcile): well under the server's 15s
-// WriteTimeout, while the Cashi HTTP client itself allows 30s.
+// WriteTimeout, and tighter than the Cashi HTTP client's own per-call limit
+// (requestTimeout, 10s, in internal/provider/cashi/client.go).
 const providerVerifyTimeout = 5 * time.Second
 
 // checkProviderStatus asks the provider for the payment's current status

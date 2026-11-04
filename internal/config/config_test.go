@@ -100,7 +100,7 @@ func TestLoad_ValidFile(t *testing.T) {
 		t.Errorf("cashi creds = %q, %q; want empty", cfg.Cashi.APIKey, cfg.Cashi.SecretKey)
 	}
 
-	wantConn := "host=db.local port=5433 user=pguser password=db-pass-123 dbname=pg_aggregator sslmode=disable"
+	wantConn := "host=db.local port=5433 user=pguser password=db-pass-123 dbname=pg_aggregator sslmode=disable statement_timeout=30000 idle_in_transaction_session_timeout=60000"
 	if got := cfg.DB.ConnectionString(); got != wantConn {
 		t.Errorf("ConnectionString() = %q, want %q", got, wantConn)
 	}

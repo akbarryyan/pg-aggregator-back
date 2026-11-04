@@ -375,6 +375,29 @@ func TestCreatePayment(t *testing.T) {
 			t.Errorf("expected fallback to camelCase orderId, got %q", resp.ProviderReference)
 		}
 	})
+
+	t.Run("success without any order id is rejected", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Neither order_id nor orderId: storing this would give the payment
+			// an empty provider_reference that no webhook can ever match.
+			_, _ = w.Write([]byte(`{
+				"success": true,
+				"amount": 50042,
+				"qrUrl": "data:image/png;base64,xxx",
+				"expires_at": "2024-01-01 10:00:00"
+			}`))
+		}))
+		defer server.Close()
+
+		adapter := NewCashiAdapter(server.URL, "my-api-key", testSecret)
+		resp, err := adapter.CreatePayment(context.Background(), newProviderRequest("INV-4", 50000))
+		if err == nil {
+			t.Fatalf("expected error when cashi returns no order id")
+		}
+		if resp != nil {
+			t.Errorf("expected no payment response, got %+v", resp)
+		}
+	})
 }
 
 func TestGetPaymentStatus(t *testing.T) {
@@ -421,4 +444,20 @@ func TestGetPaymentStatus(t *testing.T) {
 			t.Fatalf("expected error when success=false")
 		}
 	})
+}
+
+// A slow Cashi must fail fast enough for the merchant's response window: the
+// timeout stays under the API server's 15s WriteTimeout, and the adapter's
+// real HTTP client must be the one carrying it.
+func TestNewCashiAdapter_UsesRequestTimeout(t *testing.T) {
+	if requestTimeout != 10*time.Second {
+		t.Errorf("requestTimeout = %v, want 10s", requestTimeout)
+	}
+	if requestTimeout >= 15*time.Second {
+		t.Errorf("requestTimeout = %v, must be below the 15s WriteTimeout", requestTimeout)
+	}
+	a := NewCashiAdapter("http://example.invalid", "k", "s")
+	if a.httpClient.Timeout != requestTimeout {
+		t.Errorf("httpClient.Timeout = %v, want %v", a.httpClient.Timeout, requestTimeout)
+	}
 }

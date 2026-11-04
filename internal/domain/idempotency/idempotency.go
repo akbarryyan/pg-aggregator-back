@@ -18,7 +18,9 @@ const (
 	TTL = 24 * time.Hour
 	// AbandonedAfter is when a claim that never got a payment (process died, or
 	// the request is still stuck) may be claimed again. It must exceed the
-	// provider client timeout (30s) comfortably.
+	// service's claimedCreateTimeout (90s, internal/service/payment_idempotency.go),
+	// which bounds one claimed creation and covers several provider attempts of
+	// the Cashi requestTimeout (10s) each plus database work.
 	AbandonedAfter = 2 * time.Minute
 
 	maxKeyLen = 128

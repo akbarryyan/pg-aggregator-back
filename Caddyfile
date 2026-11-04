@@ -11,5 +11,40 @@
 
 api.whuzpay.web.id {
 	encode zstd gzip
+
+	# Same cap as the API itself (middleware.LimitBody, 1 MiB), but rejected at
+	# the proxy before the body is forwarded.
+	request_body {
+		max_size 1MiB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+		# Financial data: nothing from this API may be cached by clients or proxies.
+		Cache-Control "no-store"
+		-Server
+	}
+
+	# Access log. By default Caddy records every request header, which would
+	# write bearer tokens and merchant API keys into the container log; the
+	# filter below removes them. Do not remove it.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>X-Api-Key delete
+				request>headers>Cookie delete
+				request>headers>X-Gateway-Signature delete
+				request>headers>Proxy-Authorization delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+
 	reverse_proxy api:8080
 }

@@ -158,7 +158,8 @@ func newSessEnv(t *testing.T) *sessEnv {
 	// merchant/admin/payment handlers stay nil: these tests only reach routes
 	// that are rejected before the handler (or are served by AuthHandler).
 	router := setupRouter(nil, nil, handler.NewAuthHandler(authSvc), nil, nil, nil,
-		middleware.NewAuthMiddleware(authSvc), nil, limiter, limiter, limiter, limiter)
+		middleware.NewAuthMiddleware(authSvc), nil, limiter, limiter, limiter, limiter,
+		func(context.Context) error { return nil })
 	return &sessEnv{router: router, authSvc: authSvc, admin: a, aRepo: aRepo, user: u, uRepo: uRepo, merchant: m, mRepo: mRepo}
 }
 

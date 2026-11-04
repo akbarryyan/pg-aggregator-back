@@ -163,6 +163,7 @@ Semua di bawah prefix `/api/v1`:
 - `GET /public/payment-links/{slug}`, `POST /public/payment-links/{slug}/pay` — publik
 - `POST /payments`, `GET /payments/{id}`, `GET /payments/{id}/status` — merchant API key
 - `POST /provider-webhooks/{providerName}` — webhook provider, rate limited per-IP
+- `GET /health` — readiness: `200 {"status":"ok"}` bila database menjawab ping (batas 2 detik), `503 {"status":"unavailable"}` bila tidak
 
 ### Idempotency-Key (`POST /payments`)
 
@@ -205,6 +206,16 @@ yang dinonaktifkan mendapat `403` saat membuat payment.
   (`GET /merchant/webhook-secret`) tidak memerlukan password.
 - Body request dibatasi 1 MiB. Webhook provider menjawab `413` bila melebihi;
   endpoint JSON lain menjawab `400 Invalid request body`.
+
+### Health check dan integritas data
+
+`api -healthcheck` memanggil `GET /api/v1/health` di `127.0.0.1` pada port
+`app.port`, tidak mencetak apa pun, dan keluar dengan kode 0 (sehat) atau 1;
+ini dipakai healthcheck Docker di `docker-compose.yaml`. Tabel `payments`
+dilindungi constraint database (migration 019): `amount > 0`, status hanya
+`pending/paid/expired/failed/cancelled`, `(provider_name, provider_reference)`
+unik, dan merchant yang masih punya payment tidak bisa dihapus. Detail
+deploy ada di [DEPLOY.md](DEPLOY.md) bagian 4.4.
 
 ## Logging
 

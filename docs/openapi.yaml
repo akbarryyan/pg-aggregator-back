@@ -1055,9 +1055,21 @@ paths:
   /health:
     get:
       tags: [Health]
-      summary: Liveness check
+      summary: Readiness check
+      description: 'readiness: database ping, 2s deadline'
       responses:
-        '200': { description: OK }
+        '200':
+          description: Database answered the ping
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+              example: { status: ok }
+        '503':
+          description: Database did not answer within the deadline
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+              example: { status: unavailable }
 
 components:
   securitySchemes:
@@ -1430,6 +1442,11 @@ components:
         payment_methods: { type: array, items: { type: string } }
         health: { $ref: '#/components/schemas/ProviderHealth' }
         is_registered: { type: boolean }
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, unavailable] }
     ProviderHealth:
       type: object
       properties:

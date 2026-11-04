@@ -31,6 +31,12 @@ const cashiExpiresAtLayout = "2006-01-02 15:04:05"
 // host; WIB has no DST so a fixed offset is always correct.
 var cashiTimeLocation = time.FixedZone("WIB", 7*60*60)
 
+// requestTimeout bounds one call to Cashi. It stays below the API server's
+// 15s WriteTimeout so a normal attempt finishes inside the merchant's response
+// window; a slow Cashi turns into a quick 502 the merchant retries with the
+// same Idempotency-Key.
+const requestTimeout = 10 * time.Second
+
 type CashiAdapter struct {
 	baseURL    string
 	apiKey     string
@@ -46,7 +52,7 @@ func NewCashiAdapter(baseURL, apiKey, secretKey string) *CashiAdapter {
 		apiKey:    apiKey,
 		secretKey: secretKey,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: requestTimeout,
 		},
 	}
 }
@@ -72,6 +78,11 @@ func (a *CashiAdapter) CreatePayment(ctx context.Context, req *provider.Provider
 	}
 
 	orderID := cashiResp.GetOrderID()
+	if orderID == "" {
+		// Without an order id the payment could not be mapped from webhooks
+		// and would collide on the unique provider_reference index.
+		return nil, &CashiError{StatusCode: 502, Message: "cashi create-order response has no order id"}
+	}
 
 	expiresAt, err := time.ParseInLocation(cashiExpiresAtLayout, cashiResp.ExpiresAt, cashiTimeLocation)
 	if err != nil {

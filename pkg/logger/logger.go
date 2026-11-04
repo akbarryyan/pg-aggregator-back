@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,11 +44,30 @@ var (
 	enabled bool
 )
 
-// Init enables logging. level is currently unused (reserved for future
-// level filtering) — kept so Init's call sites (main.go) don't need to change.
+// Severity order for filtering; a message is written when its rank is at or
+// above the configured minimum.
+var levelRank = map[string]int32{"debug": 0, "info": 1, "warn": 2, "error": 3}
+
+// minLevel is atomic because SetLevel runs once config is loaded, while
+// background goroutines may already be logging.
+var minLevel atomic.Int32
+
+func init() { minLevel.Store(levelRank["info"]) }
+
+// Init enables logging at the given level (debug, info, warn, error). An
+// unknown or empty level means info.
 func Init(level string) {
-	_ = level
+	SetLevel(level)
 	enabled = true
+}
+
+// SetLevel changes the minimum level that is written; unknown means info.
+func SetLevel(level string) {
+	rank, ok := levelRank[strings.ToLower(strings.TrimSpace(level))]
+	if !ok {
+		rank = levelRank["info"]
+	}
+	minLevel.Store(rank)
 }
 
 // SetOutput overrides the destination writers. For tests only — production
@@ -65,6 +86,9 @@ type entry struct {
 
 func write(w io.Writer, level, requestID, msg string) {
 	if !enabled {
+		return
+	}
+	if levelRank[level] < minLevel.Load() {
 		return
 	}
 	e := entry{

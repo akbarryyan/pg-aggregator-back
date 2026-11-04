@@ -29,7 +29,8 @@ services:
         # [rate_limit] trusted_proxies = ["10.89.0.2/32"]
         ipv4_address: 10.89.0.2
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     mem_limit: 128m
     logging: *logging
 
@@ -52,6 +53,14 @@ services:
       postgres:
         condition: service_healthy
     mem_limit: 192m
+    healthcheck:
+      # The binary probes its own /api/v1/health (port read from the same
+      # .config.toml), so no port is hard-coded here and no wget is needed.
+      test: ["CMD", "/app/bin/api", "-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     logging: *logging
 
   postgres:

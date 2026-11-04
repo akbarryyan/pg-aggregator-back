@@ -31,17 +31,27 @@ import (
 )
 
 func main() {
+	configPath := flag.String("config", ".config.toml", "path to the TOML config file")
+	healthcheck := flag.Bool("healthcheck", false, "probe the local /api/v1/health endpoint and exit 0 (healthy) or 1; used by the Docker healthcheck")
+	flag.Parse()
+
+	if *healthcheck {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			os.Exit(1) // logger is not initialised: stay silent, the exit code is the signal
+		}
+		os.Exit(runHealthcheck(cfg.App.Port, &http.Client{Timeout: healthcheckClientTimeout}))
+	}
+
 	logger.Init("info")
 	logger.Info("Starting Payment Gateway Aggregator API...")
-
-	configPath := flag.String("config", ".config.toml", "path to the TOML config file")
-	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		logger.Errorf("Failed to load config: %v", err)
 		os.Exit(1)
 	}
+	logger.SetLevel(levelForEnvironment(cfg.App.Environment))
 
 	// Our own API and frontend hosts resolve to public IPs, so the SSRF IP
 	// guard can't stop a merchant from pointing a callback at us.
@@ -168,7 +178,7 @@ func main() {
 		return nil
 	})
 
-	router := setupRouter(paymentHandler, webhookHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter)
+	router := setupRouter(paymentHandler, webhookHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter, db.PingContext)
 
 	c := cors.New(cors.Options{
 		AllowedOrigins:   []string{cfg.App.FrontendURL},
@@ -221,6 +231,14 @@ func main() {
 	logger.Info("Server exited")
 }
 
+// Connection pool sizing for the single-instance deployment (see DEPLOY.md:
+// the API must stay one replica because background jobs have no leader lock).
+const (
+	dbMaxOpenConns    = 25
+	dbMaxIdleConns    = 5
+	dbConnMaxLifetime = 5 * time.Minute
+)
+
 func initDB(cfg *config.Config) (*sql.DB, error) {
 	db, err := sql.Open("postgres", cfg.DB.ConnectionString())
 	if err != nil {
@@ -231,9 +249,9 @@ func initDB(cfg *config.Config) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetMaxOpenConns(dbMaxOpenConns)
+	db.SetMaxIdleConns(dbMaxIdleConns)
+	db.SetConnMaxLifetime(dbConnMaxLifetime)
 
 	logger.Info("Database connection established")
 	return db, nil
@@ -257,6 +275,7 @@ func setupRouter(
 	publicRateLimiter *middleware.IPRateLimiter,
 	sensitiveRateLimiter *middleware.IPRateLimiter,
 	apiRateLimiter *middleware.IPRateLimiter,
+	healthCheck func(context.Context) error,
 ) http.Handler {
 	r := mux.NewRouter()
 
@@ -373,11 +392,9 @@ func setupRouter(
 	// rate limited per source IP to blunt flooding/DoS attempts.
 	api.Handle("/provider-webhooks/{providerName}", publicRateLimiter.Limit(http.HandlerFunc(webhookHandler.HandleProviderWebhook))).Methods("POST")
 
-	api.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
-	}).Methods("GET")
+	// Readiness: pings the database. Rate limited like the other public routes
+	// since it costs a DB round trip.
+	api.Handle("/health", publicRateLimiter.Limit(newHealthHandler(healthCheck))).Methods("GET")
 
 	// Wraps the whole router (not mux.Router.Use, which gorilla/mux does
 	// NOT run for unmatched routes) so every response — including a 404 for

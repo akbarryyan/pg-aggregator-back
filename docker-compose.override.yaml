@@ -41,6 +41,10 @@ services:
   api:
     <<: *dev
     command: ["air"]
+    # The dev image runs air from /src; /app/bin/api (used by the production
+    # healthcheck) does not exist there.
+    healthcheck:
+      disable: true
     ports:
       - "8090:8080"
 

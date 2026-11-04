@@ -13,12 +13,14 @@ import (
 // package-level state doesn't leak between tests in this file.
 func resetForTest(t *testing.T) (out, errOut *bytes.Buffer) {
 	t.Helper()
-	prevOut, prevErr, prevEnabled := stdout, stderr, enabled
+	prevOut, prevErr, prevEnabled, prevLevel := stdout, stderr, enabled, minLevel.Load()
 	out, errOut = &bytes.Buffer{}, &bytes.Buffer{}
 	SetOutput(out, errOut)
 	enabled = true
+	SetLevel("info")
 	t.Cleanup(func() {
 		stdout, stderr, enabled = prevOut, prevErr, prevEnabled
+		minLevel.Store(prevLevel)
 	})
 	return out, errOut
 }
@@ -115,5 +117,47 @@ func TestRequestIDFromContext_RoundTrip(t *testing.T) {
 	_, ok = RequestIDFromContext(context.Background())
 	if ok {
 		t.Fatalf("expected ok=false for a context with no request ID")
+	}
+}
+
+func TestLogger_LevelFiltering(t *testing.T) {
+	tests := []struct {
+		level string
+		want  map[string]bool // log level -> emitted
+	}{
+		{"debug", map[string]bool{"debug": true, "info": true, "warn": true, "error": true}},
+		{"info", map[string]bool{"debug": false, "info": true, "warn": true, "error": true}},
+		{"warn", map[string]bool{"debug": false, "info": false, "warn": true, "error": true}},
+		{"error", map[string]bool{"debug": false, "info": false, "warn": false, "error": true}},
+		{"nonsense", map[string]bool{"debug": false, "info": true, "warn": true, "error": true}}, // unknown -> info
+		{"", map[string]bool{"debug": false, "info": true, "warn": true, "error": true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.level, func(t *testing.T) {
+			out, errOut := resetForTest(t)
+			Init(tc.level)
+			Debug("d")
+			Info("i")
+			Warn("w")
+			Error("e")
+			got := out.String() + errOut.String()
+			for lvl, want := range tc.want {
+				has := strings.Contains(got, `"level":"`+lvl+`"`)
+				if has != want {
+					t.Errorf("level %q: %s emitted=%v, want %v\n%s", tc.level, lvl, has, want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestLogger_SetLevelChangesFilteringAtRuntime(t *testing.T) {
+	out, _ := resetForTest(t)
+	Init("info")
+	Debug("hidden")
+	SetLevel("debug")
+	Debug("shown")
+	if strings.Contains(out.String(), "hidden") || !strings.Contains(out.String(), "shown") {
+		t.Fatalf("unexpected output: %s", out.String())
 	}
 }

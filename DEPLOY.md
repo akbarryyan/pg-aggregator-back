@@ -194,6 +194,11 @@ Setelah ini, edit config dengan `sudo nano .config.toml`.
 
 Pastikan `api.whuzpay.web.id` sudah mengarah ke IP VPS (`dig +short api.whuzpay.web.id`).
 
+Instalasi baru memakai `docker-compose.yaml` dan `Caddyfile` terbaru dari 2.5, jadi
+cek 4.4 (data lama, migration 019) hanya berlaku untuk server yang di-upgrade.
+Caddy baru menyala setelah `api` healthy, sehingga `up -d` pertama butuh
+beberapa detik.
+
 ```bash
 cd ~/whuzpay
 docker compose up -d postgres
@@ -223,7 +228,7 @@ unset NEW_PW
 Verifikasi:
 
 ```bash
-docker compose ps                                             # di VPS: caddy, api, postgres harus Up (caddy paling rawan)
+docker compose ps                                             # di VPS: caddy, api, postgres harus Up; api dan postgres juga healthy (caddy paling rawan)
 curl -s https://api.whuzpay.web.id/api/v1/health              # {"status":"ok"}
 curl -sI http://api.whuzpay.web.id/api/v1/health | head -1    # 308 Permanent Redirect ke https
 nc -zv -w 5 13.48.71.251 5432                                 # harus gagal (tertutup)
@@ -241,7 +246,8 @@ docker stats --no-stream                                      # di VPS: memori d
    sebenarnya begitu migration berjalan.
 5. VPS: `make migrate` (menjalankan migration dari image BARU; tidak berbuat
    apa-apa bila tidak ada).
-6. VPS: `docker compose up -d`.
+6. VPS: `docker compose up -d`. Bila `Caddyfile` ikut berubah pada rilis ini,
+   lanjutkan dengan `docker compose restart caddy` (lihat 4.4 langkah 2).
 7. Opsional: `docker image prune -f`.
 
 **Peringatan:** tag hanya ada di salinan `docker-compose.yaml` di VPS. Jika
@@ -251,6 +257,9 @@ lagi baris tag-nya sesudahnya.
 ### 4.1 Rollback
 
 Kode: kembalikan tag sebelumnya di `x-api-image:`, lalu `docker compose up -d`.
+Bila rollback ke versi sebelum Paket 4, kembalikan juga `docker-compose.yaml`
+lama (lihat 4.4 langkah 2); constraint database Paket 4 tetap terpasang dan
+image lama kompatibel dengannya.
 Migration hanya maju: bila migration rilis baru tidak kompatibel dengan kode
 lama, pulihkan backup dari langkah 4 (lihat bagian 5).
 
@@ -406,6 +415,106 @@ langkah 1-4 sebelum `docker compose up -d` pada rilis ini.
    `400` berarti kunci tidak valid. Payment link dan pembuatan oleh admin tidak
    memakainya.
 
+### 4.4 Cek sebelum deploy Paket 4
+
+Paket 4 menambah constraint database (migration 019), health check sungguhan,
+healthcheck container, dan header/log di Caddy. Tidak ada key `.config.toml`
+baru. Kerjakan langkah 1-3 sebelum `docker compose up -d` pada rilis ini, dan
+ambil backup dulu (langkah backup di bagian 4) sebelum `make migrate`.
+
+1. **Cek data lama.** Migration 019 membatalkan diri (satu transaksi, tidak ada
+   yang berubah) bila data melanggar constraint baru. Jalankan di `psql` pada
+   DB produksi (mis. `docker compose exec postgres psql -U postgres pg_aggregator`);
+   ketiganya harus mengembalikan nol baris:
+
+   ```sql
+   SELECT id, reference, amount FROM payments WHERE amount <= 0;
+
+   SELECT id, reference, status FROM payments
+   WHERE status NOT IN ('pending', 'paid', 'expired', 'failed', 'cancelled');
+
+   SELECT provider_name, provider_reference, count(*) FROM payments
+   WHERE provider_reference IS NOT NULL
+   GROUP BY 1, 2 HAVING count(*) > 1;
+   ```
+
+   Bila ada baris, perbaiki datanya dulu (ini data keuangan; tidak dibersihkan
+   otomatis).
+2. **Ganti `docker-compose.yaml` dan `Caddyfile` di server bersama image
+   baru.** Salin keduanya dari laptop (bagian 2.5), lalu pasang lagi tag image
+   yang benar di baris `x-api-image:` (lihat peringatan di bagian 4). Jangan
+   menjalankan compose baru dengan image lama: `api` kini punya healthcheck
+   (`api -healthcheck`), flag yang tidak dikenal image lama (binary lama keluar
+   dengan kode 2), sehingga `api` dinilai tidak sehat. Pada instalasi baru,
+   Caddy (yang menunggu `api` sehat) tidak pernah menyala; pada upgrade yang
+   Caddy-nya sudah berjalan, `up -d` melaporkan "dependency failed to start
+   ... unhealthy" sementara Caddy yang berjalan tetap memproksi. Jaga compose
+   dan image selalu sinkron. Hal yang sama berlaku
+   bila rollback ke image sebelum Paket 4 (bagian 4.1): kembalikan juga
+   `docker-compose.yaml` lama. Caddy kini baru menyala setelah `api` sehat
+   (`depends_on` dengan `condition: service_healthy`, `start_period` 20 detik),
+   jadi sesudah `docker compose up -d` HTTPS tersedia beberapa detik lebih
+   lambat dari sebelumnya.
+
+   Setelah `docker compose up -d`, jalankan **`docker compose restart caddy`**.
+   Compose tidak menganggap Caddy berubah (isi `Caddyfile` tidak masuk hash
+   service, `depends_on` diabaikan), jadi `up -d` tidak membuat ulang Caddy
+   yang sudah berjalan, dan Caddy hanya membaca `Caddyfile` saat start (`scp`
+   di 2.5 menimpa file di tempat, sehingga restart membaca isi barunya). Tanpa
+   restart, header keamanan, batas body 1 MiB, dan filter log tidak berlaku
+   padahal terlihat sudah. Periksa:
+
+   ```bash
+   curl -sI https://api.whuzpay.web.id/api/v1/health | grep -i -E 'strict-transport-security|cache-control'
+   ```
+
+   Keluarannya harus memuat `strict-transport-security: max-age=31536000` dan
+   `cache-control: no-store`. (Instalasi baru tidak perlu restart: Caddy dibuat
+   baru.)
+3. **`make migrate`** menerapkan 019 sebelum image API baru dijalankan
+   (idempoten). Setelah itu menghapus merchant yang masih punya payment
+   ditolak database (`ON DELETE RESTRICT`); tabel lain (API key, user, config
+   provider, payment link) tetap ikut terhapus bersama merchant.
+4. **Header dan log Caddy.** Caddy menambah header keamanan (HSTS
+   `max-age=31536000`, `nosniff`, `Referrer-Policy: no-referrer`,
+   `X-Frame-Options: DENY`, `Cache-Control: no-store`), membatasi body 1 MiB
+   di proxy, dan menulis log akses ke stdout (`docker compose logs caddy`).
+   Log akses membuang header `Authorization`, `X-Api-Key`, `Cookie`,
+   `Set-Cookie`, ditambah `X-Gateway-Signature` dan `Proxy-Authorization`;
+   **jangan hapus blok filter itu** dari `Caddyfile`, karena
+   tanpanya bearer token dan API key merchant tertulis ke log container.
+5. **Health check.** `GET /api/v1/health` kini 200 `{"status":"ok"}` hanya
+   bila database menjawab ping (batas 2 detik); 503 `{"status":"unavailable"}`
+   bila tidak (detail error hanya ada di `docker compose logs api`). Pantau
+   dengan `docker compose ps` (kolom `STATUS` harus `healthy`).
+
+   Healthcheck container sengaja **senyap**: `api -healthcheck` tidak mencetak
+   apa pun, hanya keluar dengan kode 0 (sehat) atau 1, dan tidak membedakan
+   config gagal dimuat dari koneksi ditolak. Bila `api` `unhealthy`:
+
+   ```bash
+   docker compose ps                  # api: unhealthy / restarting?
+   docker compose logs --tail 50 api  # config tidak valid, DB tidak terjangkau, panic
+   docker compose exec api wget -O- http://127.0.0.1:8080/api/v1/health
+   ```
+
+   Perintah `wget` memakai busybox bawaan image alpine (tanpa `-q`, sehingga
+   galat HTTP seperti `503` ikut tercetak; badan jawaban 503 sendiri tidak
+   ditampilkan busybox); ganti `8080` bila
+   `app.port` di `.config.toml` berbeda. Jawaban `503` berarti server hidup
+   tetapi database tidak menjawab (cek `docker compose ps postgres` dan
+   `db.password`); koneksi ditolak berarti proses `api` belum/tidak
+   mendengarkan (lihat log).
+6. **`api` harus satu replika.** Job latar (expire, kirim callback,
+   reconcile) berjalan di dalam proses `api` tanpa kunci leader; menjalankan
+   lebih dari satu instance (mis. `docker compose up --scale api=2`) membuat
+   job berjalan ganda. Ukuran pool koneksi DB (maks 25 koneksi terbuka) juga
+   dihitung untuk satu instance.
+7. **Timeout.** Koneksi DB kini memakai `statement_timeout` 30 detik dan
+   `idle_in_transaction_session_timeout` 60 detik; panggilan ke Cashi
+   di-timeout 10 detik. Level log mengikuti `app.environment`
+   (`development` → debug, selain itu info; di VPS `production` → info).
+
 ## 5. Operasional
 
 ```bash
@@ -449,6 +558,7 @@ user `ubuntu`).
 | Gejala | Penyebab & solusi |
 |---|---|
 | Caddy gagal mendapat sertifikat | DNS `api.whuzpay.web.id` belum ke IP VPS, atau port 80/443 tertutup di security group. Cek `docker compose logs caddy`. |
+| `api` `unhealthy` (Caddy tidak menyala) | Healthcheck senyap; ikuti diagnosis di 4.4 langkah 5. Cek juga image `api` memang versi Paket 4 (image lama tidak mengenal `-healthcheck`). |
 | `api` restart terus | `docker compose logs api`: config tidak valid (`invalid config …`), atau `db.password` ≠ isi `db_password`. |
 | `permission denied` membaca config | Kepemilikan file — ulangi `chown` di bagian 2.6. |
 | `pull access denied` | Belum `docker login ghcr.io` di VPS, atau PAT tanpa `read:packages`. |

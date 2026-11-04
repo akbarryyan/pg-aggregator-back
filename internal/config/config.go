@@ -290,9 +290,18 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// Session timeouts applied to every pooled connection of the API (not to
+// psql used by make migrate). They stop one stuck query or abandoned
+// transaction from holding a connection indefinitely.
+const (
+	dbStatementTimeoutMS       = 30000
+	dbIdleInTxSessionTimeoutMS = 60000
+)
+
 func (c *DBConfig) ConnectionString() string {
 	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s statement_timeout=%d idle_in_transaction_session_timeout=%d",
 		c.Host, c.Port, c.User, c.Password, c.Name, c.SSLMode,
+		dbStatementTimeoutMS, dbIdleInTxSessionTimeoutMS,
 	)
 }

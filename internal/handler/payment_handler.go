@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
@@ -49,15 +50,24 @@ func (h *PaymentHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, err := h.paymentService.CreatePayment(r.Context(), &req)
+	idemKey, err := idempotencyKeyFromRequest(r)
 	if err != nil {
+		respondIdempotencyError(w, err)
+		return
+	}
+	res, err := h.paymentService.CreatePaymentIdempotent(r.Context(), &req, idemKey)
+	if err != nil {
+		if respondIdempotencyError(w, err) {
+			return
+		}
 		logger.ErrorfCtx(r.Context(), "Failed to create payment: %v", err)
 		respondCreatePaymentError(w, err)
 		return
 	}
-
-	response := payment.ToPaymentResponse(p, h.frontendURL)
-	respondJSON(w, http.StatusCreated, response)
+	if res.Replayed {
+		w.Header().Set("Idempotent-Replayed", "true")
+	}
+	respondJSON(w, http.StatusCreated, payment.ToPaymentResponse(res.Payment, h.frontendURL))
 }
 
 func (h *PaymentHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +203,8 @@ func respondError(w http.ResponseWriter, statusCode int, message string) {
 
 func respondCreatePaymentError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, merchant.ErrMerchantInactive):
+		respondError(w, http.StatusForbidden, "Merchant account is inactive")
 	case errors.Is(err, providerPkg.ErrProviderNotAvailable):
 		respondError(w, http.StatusServiceUnavailable, "Payment provider is temporarily unavailable")
 	case errors.Is(err, providerPkg.ErrUnsupportedPaymentMethod):

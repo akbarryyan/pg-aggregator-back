@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
@@ -313,4 +314,103 @@ func TestCreatePayment_Production_WhitespaceSandboxConfig_Skipped(t *testing.T) 
 	if cashi.createCalls != 1 {
 		t.Fatalf("expected cashi called once, got %d", cashi.createCalls)
 	}
+}
+
+func TestCreatePayment_InactiveMerchantIsRejected(t *testing.T) {
+	svc, paymentRepo, _, _ := newTestPaymentService()
+	sandbox := &fakeProvider{name: "sandbox"}
+	merchantRepo := newFakeMerchantRepo()
+	m := &merchant.Merchant{ID: uuid.New(), IsActive: false}
+	merchantRepo.byID[m.ID] = m
+	svc = svc.WithSandboxProvider(sandbox).WithMerchantCallbackDeps(merchantRepo, newFakeMerchantCallbackRepo())
+
+	req := baseCreateRequest(m.ID)
+	req.Environment = payment.EnvironmentSandbox
+	_, err := svc.CreatePayment(context.Background(), req)
+	if !errors.Is(err, merchant.ErrMerchantInactive) {
+		t.Fatalf("want ErrMerchantInactive, got %v", err)
+	}
+	if sandbox.createCalls != 0 {
+		t.Errorf("provider must not be called for an inactive merchant")
+	}
+	if len(paymentRepo.byID) != 0 {
+		t.Errorf("no payment may be stored")
+	}
+}
+
+func TestCreatePayment_ActiveOrUnknownMerchantProceeds(t *testing.T) {
+	t.Run("active merchant succeeds", func(t *testing.T) {
+		svc, paymentRepo, _, _ := newTestPaymentService()
+		merchantRepo := newFakeMerchantRepo()
+		m := &merchant.Merchant{ID: uuid.New(), IsActive: true}
+		merchantRepo.byID[m.ID] = m
+		svc = svc.WithSandboxProvider(&fakeProvider{name: "sandbox"}).
+			WithMerchantCallbackDeps(merchantRepo, newFakeMerchantCallbackRepo())
+
+		req := baseCreateRequest(m.ID)
+		req.Environment = payment.EnvironmentSandbox
+		if _, err := svc.CreatePayment(context.Background(), req); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(paymentRepo.byID) != 1 {
+			t.Errorf("expected 1 stored payment, got %d", len(paymentRepo.byID))
+		}
+	})
+
+	t.Run("unknown merchant is not blocked here (FK rejects it in the DB)", func(t *testing.T) {
+		svc, paymentRepo, _, _ := newTestPaymentService()
+		svc = svc.WithSandboxProvider(&fakeProvider{name: "sandbox"}).
+			WithMerchantCallbackDeps(newFakeMerchantRepo(), newFakeMerchantCallbackRepo())
+
+		req := baseCreateRequest(uuid.New())
+		req.Environment = payment.EnvironmentSandbox
+		if _, err := svc.CreatePayment(context.Background(), req); err != nil {
+			t.Fatalf("unknown merchant must not be rejected by the active check: %v", err)
+		}
+		if len(paymentRepo.byID) != 1 {
+			t.Errorf("expected 1 stored payment, got %d", len(paymentRepo.byID))
+		}
+	})
+
+	t.Run("nil merchantRepo skips the check", func(t *testing.T) {
+		svc, paymentRepo, _, _ := newTestPaymentService()
+		svc = svc.WithSandboxProvider(&fakeProvider{name: "sandbox"})
+
+		req := baseCreateRequest(uuid.New())
+		req.Environment = payment.EnvironmentSandbox
+		if _, err := svc.CreatePayment(context.Background(), req); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(paymentRepo.byID) != 1 {
+			t.Errorf("expected 1 stored payment, got %d", len(paymentRepo.byID))
+		}
+	})
+
+	t.Run("merchant lookup failure is not swallowed", func(t *testing.T) {
+		svc, paymentRepo, _, _ := newTestPaymentService()
+		sandbox := &fakeProvider{name: "sandbox"}
+		svc = svc.WithSandboxProvider(sandbox).
+			WithMerchantCallbackDeps(errMerchantRepo{}, newFakeMerchantCallbackRepo())
+
+		req := baseCreateRequest(uuid.New())
+		req.Environment = payment.EnvironmentSandbox
+		_, err := svc.CreatePayment(context.Background(), req)
+		if err == nil || errors.Is(err, merchant.ErrMerchantInactive) {
+			t.Fatalf("want a wrapped lookup error, got %v", err)
+		}
+		if sandbox.createCalls != 0 || len(paymentRepo.byID) != 0 {
+			t.Errorf("nothing may be created when the merchant lookup fails")
+		}
+	})
+}
+
+// errMerchantRepo fails every lookup with a non-NotFound error.
+type errMerchantRepo struct{}
+
+func (errMerchantRepo) GetByID(ctx context.Context, id uuid.UUID) (*merchant.Merchant, error) {
+	return nil, errors.New("db down")
+}
+
+func (errMerchantRepo) SetWebhookSecret(ctx context.Context, id uuid.UUID, secret string) error {
+	return nil
 }

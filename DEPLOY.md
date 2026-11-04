@@ -174,6 +174,10 @@ burst               = 30
 [rate_limit.sensitive]
 requests_per_minute = 10
 burst               = 5
+
+[rate_limit.api]
+requests_per_minute = 120
+burst               = 60
 ```
 
 Kepemilikan file (container `api`/`migrate` berjalan sebagai uid 10001,
@@ -255,8 +259,9 @@ lama, pulihkan backup dari langkah 4 (lihat bagian 5).
 Paket 2 menolak `webhook_url` merchant yang tidak `https` (selalu; hanya
 `callback_url` payment sandbox yang boleh `http`) dan URL yang
 menunjuk ke alamat internal, dan mengirim callback merchant secara asinkron
-lewat antrean di DB. Lakukan langkah berikut sebelum `make migrate` dan
-`docker compose up -d` pada rilis ini, di `psql` pada DB produksi.
+lewat antrean di DB. Kerjakan langkah 1-3 sebelum `make migrate` (langkah 4)
+dan `docker compose up -d` pada rilis ini; langkah 1-2 di `psql` pada DB
+produksi.
 
 1. **Cari URL yang akan ditolak.** Hasilnya adalah daftar merchant/payment
    yang URL-nya akan ditolak:
@@ -279,6 +284,9 @@ lewat antrean di DB. Lakukan langkah berikut sebelum `make migrate` dan
    literal privat/loopback/link-local, `localhost`, IPv6 dalam `[...]`).
    Nama domain yang resolve ke alamat internal tidak tertangkap; itu tetap
    diblokir saat pengiriman (delivery menjadi `failed` tanpa retry).
+   Batasan lain yang diketahui: domain IDN/punycode tidak dinormalisasi, dan
+   nama domain yang di-CNAME ke domain kami sendiri tidak terdeteksi saat
+   validasi (hanya domain kami dan subdomainnya yang ditolak, berdasarkan nama).
 
 2. **Bersihkan callback `pending` lama.** Kode lama bisa meninggalkan baris
    yang macet di `pending` (tidak pernah dikirim ulang). Worker baru
@@ -322,6 +330,81 @@ lewat antrean di DB. Lakukan langkah berikut sebelum `make migrate` dan
    ditolak oleh validator. Pastikan keduanya terisi benar. Cek merchant yang
    `webhook_url`-nya menunjuk ke domain kita; mereka akan ditolak saat update
    dan gagal permanen saat kirim.
+
+### 4.3 Cek sebelum deploy Paket 3
+
+Paket 3 memperketat API: validasi config produksi, pencabutan token sesi
+(logout / ganti password), idempotensi pembuatan payment (`Idempotency-Key`),
+batas ukuran body 1 MiB, dan rate limiter baru `[rate_limit.api]`. Kerjakan
+langkah 1-4 sebelum `docker compose up -d` pada rilis ini.
+
+1. **Tambah `[rate_limit.api]` ke `.config.toml` di server.** Section ini
+   wajib; tanpanya API gagal start (`docker compose logs api` menyebut key yang
+   hilang). Instalasi baru sudah mendapat section ini dari template di 2.6.
+   Salin dari `.config.example.toml`, lalu edit dengan `sudo`:
+
+   ```toml
+   [rate_limit.api]        # route JWT dashboard/admin + pembuatan payment via API key
+   requests_per_minute = 120
+   burst               = 60
+   ```
+
+   `requests_per_minute` harus > 0 dan `burst` >= 1.
+
+2. **Pastikan `trusted_proxies` benar.** Di `.config.toml` harus ada
+   `trusted_proxies = ["10.89.0.2/32"]` (IP Caddy di `docker-compose.yaml`).
+   Bila kosong atau salah di belakang Caddy, API melihat semua klien sebagai
+   satu IP (IP Caddy), sehingga **semua pengguna berbagi satu bucket rate
+   limit**: lockout login (bucket `auth`) menimpa semua orang, dan bucket `api`
+   (120/menit, burst 60) dipakai bersama oleh seluruh admin, dashboard, dan
+   merchant yang membuat payment. Smoke test setelah deploy: kirim request
+   dari dua IP klien berbeda (mis. laptop dan jaringan seluler) ke endpoint
+   ber-limit, misalnya `POST /api/v1/auth/login` dengan password salah
+   berulang-ulang dari IP pertama sampai `429`; request dari IP kedua harus
+   tetap mendapat `401`, bukan `429`.
+
+3. **Aturan config produksi.** Server menolak start bila salah satu dilanggar:
+   - `app.environment` harus persis `development` atau `production` (di VPS:
+     `production`);
+   - `security.jwt_secret` minimal 32 karakter dan bukan placeholder
+     `change-this-secret`;
+   - `app.url` dan `app.frontend_url` harus berawalan `https://`.
+
+   Periksa ketiganya sebelum menjalankan image baru. **Perhatian:** mengganti
+   `jwt_secret` membuat semua token yang ada tidak valid (semua pengguna harus
+   login ulang).
+
+4. **Migration `017` dan `018`.** Jalankan `make migrate` **sebelum** memulai
+   image API baru (setelah backup, lihat bagian 4):
+   - `017_create_idempotency_keys.sql` membuat tabel `idempotency_keys`;
+   - `018_add_sessions_valid_after.sql` menambah kolom `sessions_valid_after`
+     (nullable) di `admins` dan `merchant_users`.
+
+   Keduanya aditif dan idempoten (`IF NOT EXISTS`); `NULL` berarti tidak ada
+   token yang dibatalkan saat migration berjalan, jadi sesi yang ada tetap
+   berlaku.
+
+5. **Efek yang terlihat pengguna.**
+   - Ganti password mencabut **semua** token akun itu, termasuk di perangkat
+     lain; pengguna harus login ulang. `POST /auth/logout` dan
+     `POST /auth/admin/logout` melakukan hal yang sama.
+   - Merchant yang dinonaktifkan langsung ditolak: pembuatan payment `403`,
+     token dashboard-nya `401` (tidak menunggu token kedaluwarsa).
+   - Regenerate webhook secret kini meminta password merchant
+     (`{"password": "..."}`); membaca secret tidak. Front-end versi baru
+     mengirim password itu, jadi deploy front-end bersama backend.
+   - Body request di atas 1 MiB ditolak: `413` di webhook provider, `400
+     Invalid request body` di endpoint JSON lain.
+
+6. **Untuk merchant yang memakai `Idempotency-Key`.** Header ini opsional
+   (1-128 karakter ASCII tercetak, berlaku 24 jam per merchant + environment).
+   Gunakan UUID baru per niat bayar dan ulangi kunci yang sama saat retry:
+   respons ulang adalah payment dengan status **terkini** plus header
+   `Idempotent-Replayed: true`. `409` berarti request pertama dengan kunci itu
+   masih diproses (coba lagi sebentar lagi); `422` berarti kunci dipakai untuk
+   isi request yang berbeda (jangan pakai ulang kunci untuk payment lain);
+   `400` berarti kunci tidak valid. Payment link dan pembuatan oleh admin tidak
+   memakainya.
 
 ## 5. Operasional
 

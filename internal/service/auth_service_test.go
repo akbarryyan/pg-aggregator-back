@@ -114,7 +114,29 @@ func (f *fakeAuthMerchantUserRepo) UpdateProfile(ctx context.Context, id uuid.UU
 	return nil
 }
 
+// UpdatePasswordHash mirrors the SQL: a password change also stamps
+// sessions_valid_after so older tokens die.
 func (f *fakeAuthMerchantUserRepo) UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.byID[id]
+	if !ok {
+		return merchant.ErrMerchantUserNotFound
+	}
+	now := time.Now().UTC()
+	u.PasswordHash = hash
+	u.SessionsValidAfter = &now
+	return nil
+}
+
+func (f *fakeAuthMerchantUserRepo) RevokeSessions(ctx context.Context, id uuid.UUID, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.byID[id]
+	if !ok {
+		return merchant.ErrMerchantUserNotFound
+	}
+	u.SessionsValidAfter = &at
 	return nil
 }
 

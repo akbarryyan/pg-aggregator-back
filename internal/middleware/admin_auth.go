@@ -3,10 +3,14 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/admin"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
+	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
 )
 
@@ -41,6 +45,17 @@ func (m *AuthMiddleware) RequireMerchant(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusUnauthorized, "Invalid or expired token")
 			return
 		}
+		// A valid signature is not enough: the account must still be active
+		// and the token not revoked (logout / password change).
+		if err := m.authService.AuthorizeMerchant(r.Context(), claims); err != nil {
+			if errors.Is(err, merchant.ErrMerchantInvalidCredentials) {
+				writeJSONError(w, http.StatusUnauthorized, "Invalid or expired token")
+				return
+			}
+			logger.ErrorfCtx(r.Context(), "merchant session check failed: %v", err)
+			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+			return
+		}
 		ctx := context.WithValue(r.Context(), MerchantIDContextKey, claims.MerchantID)
 		ctx = context.WithValue(ctx, MerchantUserIDContextKey, claims.UserID)
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -69,6 +84,16 @@ func (m *AuthMiddleware) RequireAdmin(next http.Handler) http.Handler {
 		claims, err := m.authService.ParseAdminToken(parts[1])
 		if err != nil {
 			writeJSONError(w, http.StatusUnauthorized, "Invalid or expired token")
+			return
+		}
+
+		if err := m.authService.AuthorizeAdmin(r.Context(), claims); err != nil {
+			if errors.Is(err, admin.ErrInvalidToken) {
+				writeJSONError(w, http.StatusUnauthorized, "Invalid or expired token")
+				return
+			}
+			logger.ErrorfCtx(r.Context(), "admin session check failed: %v", err)
+			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
 			return
 		}
 

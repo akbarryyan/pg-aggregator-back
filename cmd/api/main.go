@@ -62,6 +62,7 @@ func main() {
 	apiKeyRepo := repository.NewMerchantAPIKeyRepository(db)
 	merchantUserRepo := repository.NewMerchantUserRepository(db)
 	adminRepo := repository.NewAdminRepository(db)
+	idempotencyRepo := repository.NewIdempotencyRepository(db)
 	cashiAdapter := cashi.NewCashiAdapter(
 		cfg.Cashi.BaseURL,
 		cfg.Cashi.APIKey,
@@ -79,7 +80,8 @@ func main() {
 
 	paymentService := service.NewPaymentService(paymentRepo, merchantProviderConfigRepo, webhookEventRepo, providerRouter, cfg.App.URL).
 		WithMerchantCallbackDeps(merchantRepo, callbackRepo).
-		WithSandboxProvider(sandboxAdapter)
+		WithSandboxProvider(sandboxAdapter).
+		WithIdempotency(idempotencyRepo)
 	paymentLinkService := service.NewPaymentLinkService(paymentLinkRepo, paymentRepo, paymentService)
 	authService := service.NewAuthService(adminRepo, cfg.Security.JWTSecret).
 		WithMerchantAuth(merchantUserRepo, merchantRepo)
@@ -120,7 +122,10 @@ func main() {
 	// already-authenticated account-mutation actions (change password,
 	// create/rotate/revoke API keys, regenerate webhook secret) that were
 	// previously unlimited — a stolen/leaked token could otherwise hammer
-	// them with no throttling at all. Per-client-IP, in-process — see
+	// them with no throttling at all. apiRateLimiter covers the remaining
+	// authenticated API traffic (admin panel, merchant dashboard, and
+	// POST /payments by API key) with its own bucket, so polling on the public
+	// limiter can't starve payment creation. Per-client-IP, in-process — see
 	// internal/middleware/rate_limit.go. Budgets and the trusted reverse
 	// proxies (Caddy on the VPS) come from [rate_limit] in .config.toml.
 	trustedProxies, err := cfg.RateLimit.TrustedProxyPrefixes()
@@ -132,6 +137,7 @@ func main() {
 	authRateLimiter := newRateLimiter(cfg.RateLimit.Auth, trustedProxies)
 	publicRateLimiter := newRateLimiter(cfg.RateLimit.Public, trustedProxies)
 	sensitiveRateLimiter := newRateLimiter(cfg.RateLimit.Sensitive, trustedProxies)
+	apiRateLimiter := newRateLimiter(cfg.RateLimit.API, trustedProxies)
 
 	// Background jobs: expire unpaid payments past their deadline, send
 	// queued merchant callbacks (and retry failed ones) every few seconds,
@@ -151,25 +157,29 @@ func main() {
 		}()
 	}
 	startJob(time.Minute, "expire-payments", paymentService.ExpirePayments)
+	startJob(time.Hour, "purge-idempotency-keys", paymentService.PurgeIdempotencyKeys)
 	startJob(service.CallbackDeliveryInterval, "deliver-merchant-callbacks", paymentService.DeliverMerchantCallbacks)
 	startJob(service.ReconcileInterval, "reconcile-payments", paymentService.ReconcileRecentPayments)
 	startJob(10*time.Minute, "rate-limiter-cleanup", func(ctx context.Context) error {
 		authRateLimiter.Cleanup(30 * time.Minute)
 		publicRateLimiter.Cleanup(30 * time.Minute)
 		sensitiveRateLimiter.Cleanup(30 * time.Minute)
+		apiRateLimiter.Cleanup(30 * time.Minute)
 		return nil
 	})
 
-	router := setupRouter(paymentHandler, webhookHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter)
+	router := setupRouter(paymentHandler, webhookHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter)
 
 	c := cors.New(cors.Options{
 		AllowedOrigins:   []string{cfg.App.FrontendURL},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key", "Idempotency-Key"},
+		ExposedHeaders:   []string{"Idempotent-Replayed"},
 		AllowCredentials: true,
 	})
 
-	handler := c.Handler(router)
+	// 1 MiB cap on every request body.
+	handler := middleware.LimitBody(1 << 20)(c.Handler(router))
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.App.Port),
@@ -177,6 +187,9 @@ func main() {
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
+
+		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	go func() {
@@ -243,6 +256,7 @@ func setupRouter(
 	authRateLimiter *middleware.IPRateLimiter,
 	publicRateLimiter *middleware.IPRateLimiter,
 	sensitiveRateLimiter *middleware.IPRateLimiter,
+	apiRateLimiter *middleware.IPRateLimiter,
 ) http.Handler {
 	r := mux.NewRouter()
 
@@ -251,20 +265,27 @@ func setupRouter(
 	// Merchant dashboard login (public) — rate limited, classic brute-force target.
 	api.Handle("/auth/login", authRateLimiter.Limit(http.HandlerFunc(authHandler.LoginMerchant))).Methods("POST")
 	api.Handle("/auth/register", authRateLimiter.Limit(http.HandlerFunc(authHandler.RegisterMerchant))).Methods("POST")
-	api.HandleFunc("/auth/me", authHandler.GetMerchantMe).Methods("GET")
-	api.HandleFunc("/auth/profile", authHandler.UpdateMerchantProfile).Methods("PUT")
+	// Handler-authenticated account routes cost 1-2 DB queries per request, so
+	// they share the per-IP api bucket (spec 3.5) instead of staying unlimited.
+	api.Handle("/auth/logout", apiRateLimiter.Limit(http.HandlerFunc(authHandler.LogoutMerchant))).Methods("POST")
+	api.Handle("/auth/me", apiRateLimiter.Limit(http.HandlerFunc(authHandler.GetMerchantMe))).Methods("GET")
+	api.Handle("/auth/profile", apiRateLimiter.Limit(http.HandlerFunc(authHandler.UpdateMerchantProfile))).Methods("PUT")
 	// change-password is auth-gated (JWT parsed inside the handler) but was
 	// previously unlimited — a leaked/stolen token could hammer it with no
 	// throttling at all.
 	api.Handle("/auth/change-password", sensitiveRateLimiter.Limit(http.HandlerFunc(authHandler.ChangeMerchantPassword))).Methods("POST")
 
 	api.Handle("/auth/admin/login", authRateLimiter.Limit(http.HandlerFunc(authHandler.LoginAdmin))).Methods("POST")
-	api.HandleFunc("/auth/admin/me", authHandler.GetMe).Methods("GET")
-	api.HandleFunc("/auth/admin/profile", authHandler.UpdateProfile).Methods("PUT")
+	api.Handle("/auth/admin/logout", apiRateLimiter.Limit(http.HandlerFunc(authHandler.LogoutAdmin))).Methods("POST")
+	api.Handle("/auth/admin/me", apiRateLimiter.Limit(http.HandlerFunc(authHandler.GetMe))).Methods("GET")
+	api.Handle("/auth/admin/profile", apiRateLimiter.Limit(http.HandlerFunc(authHandler.UpdateProfile))).Methods("PUT")
 	api.Handle("/auth/admin/change-password", sensitiveRateLimiter.Limit(http.HandlerFunc(authHandler.ChangePassword))).Methods("POST")
 
 	// Protected admin panel APIs
 	adminAPI := api.PathPrefix("/admin").Subrouter()
+	// Use() order is execution order: throttle before the (DB-backed) auth
+	// check so forged tokens can't be used to hammer the database.
+	adminAPI.Use(apiRateLimiter.Limit)
 	adminAPI.Use(authMiddleware.RequireAdmin)
 	adminAPI.HandleFunc("/dashboard/summary", adminHandler.GetDashboardSummary).Methods("GET")
 	adminAPI.HandleFunc("/dashboard/charts", adminHandler.GetDashboardCharts).Methods("GET")
@@ -305,6 +326,7 @@ func setupRouter(
 
 	// Merchant dashboard APIs (JWT session)
 	merchantDash := api.PathPrefix("/merchant").Subrouter()
+	merchantDash.Use(apiRateLimiter.Limit)
 	merchantDash.Use(authMiddleware.RequireMerchant)
 	merchantDash.HandleFunc("/dashboard/summary", merchantHandler.GetDashboardSummary).Methods("GET")
 	merchantDash.HandleFunc("/dashboard/charts", merchantHandler.GetDashboardCharts).Methods("GET")
@@ -338,15 +360,14 @@ func setupRouter(
 	api.Handle("/public/payment-links/{slug}", publicRateLimiter.Limit(http.HandlerFunc(paymentLinkHandler.GetPublicPaymentLink))).Methods("GET")
 	api.Handle("/public/payment-links/{slug}/pay", publicRateLimiter.Limit(http.HandlerFunc(paymentLinkHandler.InitiatePaymentLinkCheckout))).Methods("POST")
 
-	// Merchant public API (API key required). Rate limit runs before the
-	// (DB-hitting) API key auth check, so a flood of bad keys can't be used
-	// to hammer the database.
-	merchantAPI := api.PathPrefix("").Subrouter()
-	merchantAPI.Use(publicRateLimiter.Limit)
-	merchantAPI.Use(merchantAPIAuth.RequireMerchantAPIKey)
-	merchantAPI.HandleFunc("/payments", paymentHandler.CreatePayment).Methods("POST")
-	merchantAPI.HandleFunc("/payments/{id}", paymentHandler.GetPayment).Methods("GET")
-	merchantAPI.HandleFunc("/payments/{id}/status", paymentHandler.GetPaymentStatus).Methods("GET")
+	// Merchant public API (API key required). Each route is wrapped
+	// limiter-first, then the (DB-hitting) API key auth, so a flood of bad
+	// keys can't be used to hammer the database. Payment creation has its own
+	// apiRateLimiter bucket, separate from the publicRateLimiter shared by
+	// status polling, so polling can't exhaust a merchant's create budget.
+	api.Handle("/payments", apiRateLimiter.Limit(merchantAPIAuth.RequireMerchantAPIKey(http.HandlerFunc(paymentHandler.CreatePayment)))).Methods("POST")
+	api.Handle("/payments/{id}", publicRateLimiter.Limit(merchantAPIAuth.RequireMerchantAPIKey(http.HandlerFunc(paymentHandler.GetPayment)))).Methods("GET")
+	api.Handle("/payments/{id}/status", publicRateLimiter.Limit(merchantAPIAuth.RequireMerchantAPIKey(http.HandlerFunc(paymentHandler.GetPaymentStatus)))).Methods("GET")
 
 	// Provider webhook (e.g. Cashi) — signature-verified downstream, but still
 	// rate limited per source IP to blunt flooding/DoS attempts.

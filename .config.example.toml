@@ -31,7 +31,7 @@ api_key    = ""                          # x-api-key header; required when app.e
 secret_key = ""                          # webhook HMAC secret; required when app.environment = "production"
 
 [security]
-jwt_secret = "change-this-secret"        # must not be empty; must be changed in production
+jwt_secret = "change-this-secret"        # must not be empty; in production at least 32 chars and not the placeholder
 
 [rate_limit]  # per-client-IP token buckets (internal/middleware/rate_limit.go)
 # CIDRs of reverse proxies whose X-Forwarded-For header names the client IP.
@@ -50,3 +50,7 @@ burst               = 30
 [rate_limit.sensitive]  # change-password, API key create/rotate/revoke, webhook secret rotation
 requests_per_minute = 10
 burst               = 5
+
+[rate_limit.api]        # JWT-authenticated dashboard/admin routes + API-key payment creation
+requests_per_minute = 120
+burst               = 60

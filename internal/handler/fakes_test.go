@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/admin"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/idempotency"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
@@ -288,7 +289,20 @@ func (f *fakeAdminRepo) UpdatePasswordHash(ctx context.Context, id uuid.UUID, pa
 	if !ok {
 		return admin.ErrAdminNotFound
 	}
+	now := time.Now().UTC()
 	a.PasswordHash = passwordHash
+	a.SessionsValidAfter = &now
+	return nil
+}
+
+func (f *fakeAdminRepo) RevokeSessions(ctx context.Context, id uuid.UUID, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.byID[id]
+	if !ok {
+		return admin.ErrAdminNotFound
+	}
+	a.SessionsValidAfter = &at
 	return nil
 }
 
@@ -423,7 +437,20 @@ func (f *fakeMerchantUserRepo) UpdatePasswordHash(ctx context.Context, id uuid.U
 	if !ok {
 		return merchant.ErrMerchantUserNotFound
 	}
+	now := time.Now().UTC()
 	u.PasswordHash = hash
+	u.SessionsValidAfter = &now
+	return nil
+}
+
+func (f *fakeMerchantUserRepo) RevokeSessions(ctx context.Context, id uuid.UUID, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.byID[id]
+	if !ok {
+		return merchant.ErrMerchantUserNotFound
+	}
+	u.SessionsValidAfter = &at
 	return nil
 }
 
@@ -433,4 +460,77 @@ func (f *fakeMerchantUserRepo) Create(ctx context.Context, u *merchant.User) (*m
 
 func (f *fakePaymentRepo) ListReconcileCandidates(ctx context.Context, now time.Time, pendingWindow, expiredWindow time.Duration, limit int, after *payment.ReconcileCursor) ([]*payment.Payment, error) {
 	return nil, nil
+}
+
+// ---- idempotency repository ----
+
+// fakeIdempotencyRepo is the in-memory twin of repository.IdempotencyRepository
+// (same take-over rules); it satisfies the service's private interface
+// structurally.
+type fakeIdempotencyRepo struct {
+	mu   sync.Mutex
+	rows map[string]*idempotency.Record
+}
+
+func newFakeIdempotencyRepo() *fakeIdempotencyRepo {
+	return &fakeIdempotencyRepo{rows: map[string]*idempotency.Record{}}
+}
+
+func (f *fakeIdempotencyRepo) Claim(
+	ctx context.Context, merchantID uuid.UUID, environment, key, requestHash string, now time.Time,
+) (*idempotency.Record, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := merchantID.String() + "|" + environment + "|" + key
+	if ex, ok := f.rows[k]; ok {
+		expired := ex.CreatedAt.Before(now.Add(-idempotency.TTL))
+		abandoned := ex.PaymentID == nil && ex.CreatedAt.Before(now.Add(-idempotency.AbandonedAfter))
+		if !expired && !abandoned {
+			cp := *ex
+			return &cp, false, nil
+		}
+	}
+	rec := &idempotency.Record{ID: uuid.New(), MerchantID: merchantID, Environment: environment,
+		Key: key, RequestHash: requestHash, CreatedAt: now}
+	f.rows[k] = rec
+	cp := *rec
+	return &cp, true, nil
+}
+
+func (f *fakeIdempotencyRepo) Complete(ctx context.Context, id, paymentID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.rows {
+		if r.ID == id {
+			pid := paymentID
+			r.PaymentID = &pid
+			return nil
+		}
+	}
+	return idempotency.ErrClaimLost
+}
+
+func (f *fakeIdempotencyRepo) Release(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, r := range f.rows {
+		if r.ID == id && r.PaymentID == nil {
+			delete(f.rows, k)
+		}
+	}
+	return nil
+}
+
+func (f *fakeIdempotencyRepo) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	return 0, nil
+}
+
+// forgetPayments clears every claim's payment link, modelling a claim whose
+// owner is still working (in progress) with its request hash intact.
+func (f *fakeIdempotencyRepo) forgetPayments() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.rows {
+		r.PaymentID = nil
+	}
 }

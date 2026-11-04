@@ -43,7 +43,7 @@ func (r *MerchantUserRepository) GetByEmail(ctx context.Context, email string) (
 	email = strings.ToLower(strings.TrimSpace(email))
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, merchant_id, name, email, password_hash, role, is_active,
-		       last_login_at, created_at, updated_at
+		       last_login_at, created_at, updated_at, sessions_valid_after
 		FROM merchant_users
 		WHERE LOWER(email) = $1
 	`, email)
@@ -53,7 +53,7 @@ func (r *MerchantUserRepository) GetByEmail(ctx context.Context, email string) (
 func (r *MerchantUserRepository) GetByID(ctx context.Context, id uuid.UUID) (*merchant.User, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, merchant_id, name, email, password_hash, role, is_active,
-		       last_login_at, created_at, updated_at
+		       last_login_at, created_at, updated_at, sessions_valid_after
 		FROM merchant_users
 		WHERE id = $1
 	`, id)
@@ -84,9 +84,23 @@ func (r *MerchantUserRepository) UpdateProfile(ctx context.Context, id uuid.UUID
 func (r *MerchantUserRepository) UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash string) error {
 	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx, `
-		UPDATE merchant_users SET password_hash = $2, updated_at = $3 WHERE id = $1
+		UPDATE merchant_users SET password_hash = $2, sessions_valid_after = $3, updated_at = $3 WHERE id = $1
 	`, id, hash, now)
 	return err
+}
+
+// RevokeSessions invalidates every JWT issued before at (logout, password change).
+func (r *MerchantUserRepository) RevokeSessions(ctx context.Context, id uuid.UUID, at time.Time) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE merchant_users SET sessions_valid_after = $2, updated_at = $2 WHERE id = $1
+	`, id, at.UTC())
+	if err != nil {
+		return fmt.Errorf("failed to revoke merchant user sessions: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return merchant.ErrMerchantUserNotFound
+	}
+	return nil
 }
 
 type merchantUserScanner interface {
@@ -95,12 +109,13 @@ type merchantUserScanner interface {
 
 func scanMerchantUser(row merchantUserScanner) (*merchant.User, error) {
 	var (
-		u         merchant.User
-		lastLogin sql.NullTime
+		u          merchant.User
+		lastLogin  sql.NullTime
+		validAfter sql.NullTime
 	)
 	err := row.Scan(
 		&u.ID, &u.MerchantID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.IsActive,
-		&lastLogin, &u.CreatedAt, &u.UpdatedAt,
+		&lastLogin, &u.CreatedAt, &u.UpdatedAt, &validAfter,
 	)
 	if err == sql.ErrNoRows {
 		return nil, merchant.ErrMerchantUserNotFound
@@ -111,6 +126,10 @@ func scanMerchantUser(row merchantUserScanner) (*merchant.User, error) {
 	if lastLogin.Valid {
 		t := lastLogin.Time
 		u.LastLoginAt = &t
+	}
+	if validAfter.Valid {
+		t := validAfter.Time
+		u.SessionsValidAfter = &t
 	}
 	return &u, nil
 }

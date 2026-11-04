@@ -33,6 +33,8 @@ type User struct {
 	LastLoginAt  *time.Time `json:"last_login_at,omitempty" db:"last_login_at"`
 	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at" db:"updated_at"`
+	// SessionsValidAfter is the token revocation cutoff (NULL = none).
+	SessionsValidAfter *time.Time `json:"-" db:"sessions_valid_after"`
 }
 
 type UserLoginRequest struct {

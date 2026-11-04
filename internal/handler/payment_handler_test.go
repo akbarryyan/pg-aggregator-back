@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
@@ -20,6 +21,12 @@ import (
 // newTestPaymentService wires PaymentService with in-memory fakes and a real
 // sandbox adapter — mirrors how main.go wires it, minus Postgres.
 func newTestPaymentService() (*service.PaymentService, *fakePaymentRepo) {
+	svc, repo, _ := newTestPaymentServiceWithIdem()
+	return svc, repo
+}
+
+func newTestPaymentServiceWithIdem() (*service.PaymentService, *fakePaymentRepo, *fakeIdempotencyRepo) {
+	idem := newFakeIdempotencyRepo()
 	paymentRepo := newFakePaymentRepo()
 	router := providerPkg.NewProviderRouter()
 	sb := sandbox.NewAdapter()
@@ -31,9 +38,9 @@ func newTestPaymentService() (*service.PaymentService, *fakePaymentRepo) {
 		newFakeWebhookEventRepo(),
 		router,
 		"http://localhost:8080",
-	).WithSandboxProvider(sb)
+	).WithSandboxProvider(sb).WithIdempotency(idem)
 
-	return svc, paymentRepo
+	return svc, paymentRepo, idem
 }
 
 func TestPaymentHandler_CreatePayment_SandboxSuccess(t *testing.T) {
@@ -269,5 +276,127 @@ func TestPaymentHandler_GetPaymentByReference_MissingReference(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+// postCreate posts a sandbox payment body with an optional Idempotency-Key.
+func postCreate(h *PaymentHandler, amount int, key string, setKey bool, merchantID string) *httptest.ResponseRecorder {
+	raw, _ := json.Marshal(map[string]interface{}{
+		"merchant_id": merchantID, "amount": amount, "payment_method": "qris",
+		"description": "idem", "environment": "sandbox",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", bytes.NewReader(raw))
+	if setKey {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	rec := httptest.NewRecorder()
+	h.CreatePayment(rec, req)
+	return rec
+}
+
+func TestPaymentHandler_CreatePayment_IdempotencyKeyReplays(t *testing.T) {
+	svc, _ := newTestPaymentService()
+	h := NewPaymentHandler(svc, "http://localhost:3000")
+	m := uuid.New().String()
+
+	first := postCreate(h, 50000, "key-1", true, m)
+	second := postCreate(h, 50000, "key-1", true, m)
+	if first.Code != http.StatusCreated || second.Code != http.StatusCreated {
+		t.Fatalf("want 201/201, got %d/%d: %s", first.Code, second.Code, second.Body.String())
+	}
+	var a, b map[string]interface{}
+	_ = json.Unmarshal(first.Body.Bytes(), &a)
+	_ = json.Unmarshal(second.Body.Bytes(), &b)
+	if a["reference"] == nil || a["reference"] != b["reference"] {
+		t.Errorf("replay must return the same reference: %v vs %v", a["reference"], b["reference"])
+	}
+	if first.Header().Get("Idempotent-Replayed") != "" {
+		t.Error("the original response must not carry Idempotent-Replayed")
+	}
+	if second.Header().Get("Idempotent-Replayed") != "true" {
+		t.Error("the replay must carry Idempotent-Replayed: true")
+	}
+}
+
+func TestPaymentHandler_CreatePayment_IdempotencyKeyReusedWithDifferentBody(t *testing.T) {
+	svc, _ := newTestPaymentService()
+	h := NewPaymentHandler(svc, "http://localhost:3000")
+	m := uuid.New().String()
+
+	postCreate(h, 50000, "key-1", true, m)
+	rec := postCreate(h, 60000, "key-1", true, m)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPaymentHandler_CreatePayment_InvalidIdempotencyKey(t *testing.T) {
+	svc, _ := newTestPaymentService()
+	h := NewPaymentHandler(svc, "http://localhost:3000")
+	m := uuid.New().String()
+
+	for name, key := range map[string]string{"space": "has space", "too long": strings.Repeat("a", 129)} {
+		rec := postCreate(h, 50000, key, true, m)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestPaymentHandler_CreatePayment_NoKeyCreatesDistinctPayments(t *testing.T) {
+	svc, repo := newTestPaymentService()
+	h := NewPaymentHandler(svc, "http://localhost:3000")
+	m := uuid.New().String()
+
+	a := postCreate(h, 50000, "", false, m)
+	b := postCreate(h, 50000, "", false, m)
+	if a.Code != http.StatusCreated || b.Code != http.StatusCreated {
+		t.Fatalf("want 201/201, got %d/%d", a.Code, b.Code)
+	}
+	if len(repo.byID) != 2 {
+		t.Errorf("want 2 payments, got %d", len(repo.byID))
+	}
+	if b.Header().Get("Idempotent-Replayed") != "" {
+		t.Error("no key means no replay header")
+	}
+}
+
+// postCreateRawKeys posts a sandbox payment with the given raw Idempotency-Key
+// header values (none, one empty, several...).
+func postCreateRawKeys(h *PaymentHandler, merchantID string, keys ...string) *httptest.ResponseRecorder {
+	raw, _ := json.Marshal(map[string]interface{}{
+		"merchant_id": merchantID, "amount": 50000, "payment_method": "qris",
+		"description": "idem", "environment": "sandbox",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", bytes.NewReader(raw))
+	for _, k := range keys {
+		req.Header.Add("Idempotency-Key", k)
+	}
+	rec := httptest.NewRecorder()
+	h.CreatePayment(rec, req)
+	return rec
+}
+
+func TestPaymentHandler_CreatePayment_EmptyOrRepeatedIdempotencyKeyIs400(t *testing.T) {
+	svc, repo := newTestPaymentService()
+	h := NewPaymentHandler(svc, "http://localhost:3000")
+	m := uuid.New().String()
+
+	cases := map[string][]string{
+		"empty value":     {""},
+		"two values":      {"key-1", "key-2"},
+		"two equal":       {"key-1", "key-1"},
+		"empty plus real": {"", "key-1"},
+	}
+	for name, keys := range cases {
+		if rec := postCreateRawKeys(h, m, keys...); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	if len(repo.byID) != 0 {
+		t.Errorf("a rejected key must not create payments, got %d", len(repo.byID))
+	}
+	if rec := postCreateRawKeys(h, m); rec.Code != http.StatusCreated {
+		t.Errorf("absent header: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

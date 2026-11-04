@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -297,6 +298,15 @@ func (h *AuthHandler) authenticateMerchant(w http.ResponseWriter, r *http.Reques
 		respondError(w, http.StatusUnauthorized, "Invalid or expired token")
 		return nil, false
 	}
+	if err := h.authService.AuthorizeMerchant(r.Context(), claims); err != nil {
+		if errors.Is(err, merchant.ErrMerchantInvalidCredentials) {
+			respondError(w, http.StatusUnauthorized, "Invalid or expired token")
+		} else {
+			logger.ErrorfCtx(r.Context(), "merchant session check failed: %v", err)
+			respondError(w, http.StatusInternalServerError, "Internal server error")
+		}
+		return nil, false
+	}
 	return claims, true
 }
 
@@ -319,5 +329,41 @@ func (h *AuthHandler) authenticateAdmin(w http.ResponseWriter, r *http.Request) 
 		return nil, false
 	}
 
+	if err := h.authService.AuthorizeAdmin(r.Context(), claims); err != nil {
+		if errors.Is(err, admin.ErrInvalidToken) {
+			respondError(w, http.StatusUnauthorized, "Invalid or expired token")
+		} else {
+			logger.ErrorfCtx(r.Context(), "admin session check failed: %v", err)
+			respondError(w, http.StatusInternalServerError, "Internal server error")
+		}
+		return nil, false
+	}
+
 	return claims, true
+}
+
+func (h *AuthHandler) LogoutMerchant(w http.ResponseWriter, r *http.Request) {
+	claims, ok := h.authenticateMerchant(w, r)
+	if !ok {
+		return
+	}
+	if err := h.authService.LogoutMerchant(r.Context(), claims.UserID); err != nil {
+		logger.ErrorfCtx(r.Context(), "Merchant logout failed: %v", err)
+		respondError(w, http.StatusInternalServerError, "Failed to sign out")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"message": "Signed out"})
+}
+
+func (h *AuthHandler) LogoutAdmin(w http.ResponseWriter, r *http.Request) {
+	claims, ok := h.authenticateAdmin(w, r)
+	if !ok {
+		return
+	}
+	if err := h.authService.LogoutAdmin(r.Context(), claims.AdminID); err != nil {
+		logger.ErrorfCtx(r.Context(), "Admin logout failed: %v", err)
+		respondError(w, http.StatusInternalServerError, "Failed to sign out")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"message": "Signed out"})
 }

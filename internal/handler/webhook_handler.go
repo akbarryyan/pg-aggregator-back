@@ -30,6 +30,11 @@ func (h *WebhookHandler) HandleProviderWebhook(w http.ResponseWriter, r *http.Re
 
 	rawPayload, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			respondError(w, http.StatusRequestEntityTooLarge, "Request body too large")
+			return
+		}
 		logger.ErrorfCtx(r.Context(), "Failed to read webhook payload: %v", err)
 		respondError(w, http.StatusBadRequest, "Failed to read request body")
 		return

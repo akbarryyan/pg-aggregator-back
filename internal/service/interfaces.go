@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/idempotency"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/paymentlink"
@@ -37,6 +38,13 @@ type paymentRepository interface {
 		environment string,
 		limit, offset int,
 	) ([]repository.AdminPaymentRow, error)
+}
+
+type idempotencyRepository interface {
+	Claim(ctx context.Context, merchantID uuid.UUID, environment, key, requestHash string, now time.Time) (*idempotency.Record, bool, error)
+	Complete(ctx context.Context, id, paymentID uuid.UUID) error
+	Release(ctx context.Context, id uuid.UUID) error
+	PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 type merchantProviderConfigRepository interface {

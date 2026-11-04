@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
@@ -23,6 +24,7 @@ type PaymentService struct {
 	merchantProviderConfigRepo merchantProviderConfigRepository
 	webhookEventRepo           webhookEventRepository
 	callbackRepo               merchantCallbackRepository
+	idempotencyRepo            idempotencyRepository
 	providerRouter             *providerPkg.ProviderRouter
 	sandboxProvider            providerPkg.PaymentProvider
 	appBaseURL                 string
@@ -85,8 +87,33 @@ func (s *PaymentService) WithSandboxProvider(p providerPkg.PaymentProvider) *Pay
 	return s
 }
 
+// ensureMerchantActive is the single choke point for every payment-creation
+// path (API key, dashboard, public payment-link checkout, admin): a merchant
+// deactivated after a token or link was issued must not create new payments.
+// An unknown merchant is left to the foreign key; no merchant repo (unit-test
+// wiring) skips the check.
+func (s *PaymentService) ensureMerchantActive(ctx context.Context, merchantID uuid.UUID) error {
+	if s.merchantRepo == nil {
+		return nil
+	}
+	m, err := s.merchantRepo.GetByID(ctx, merchantID)
+	if err != nil {
+		if errors.Is(err, merchant.ErrMerchantNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to load merchant: %w", err)
+	}
+	if !m.IsActive {
+		return merchant.ErrMerchantInactive
+	}
+	return nil
+}
+
 func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreatePaymentRequest) (*payment.Payment, error) {
 	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	if err := s.ensureMerchantActive(ctx, req.MerchantID); err != nil {
 		return nil, err
 	}
 

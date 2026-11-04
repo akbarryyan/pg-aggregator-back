@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -56,6 +57,7 @@ type authMerchantUserRepository interface {
 	UpdateProfile(ctx context.Context, id uuid.UUID, name, email string) error
 	UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash string) error
 	Create(ctx context.Context, u *merchant.User) (*merchant.User, error)
+	RevokeSessions(ctx context.Context, id uuid.UUID, at time.Time) error
 }
 
 // authAdminRepository captures exactly the repository methods AuthService
@@ -69,6 +71,7 @@ type authAdminRepository interface {
 	UpdatePasswordHash(ctx context.Context, id uuid.UUID, passwordHash string) error
 	ExistsByEmailExceptID(ctx context.Context, email string, id uuid.UUID) (bool, error)
 	UpdateProfile(ctx context.Context, id uuid.UUID, name, email string) (*admin.Admin, error)
+	RevokeSessions(ctx context.Context, id uuid.UUID, at time.Time) error
 }
 
 type AuthService struct {
@@ -493,4 +496,77 @@ func (s *AuthService) VerifyMerchantPassword(ctx context.Context, userID uuid.UU
 		return merchant.ErrMerchantInvalidCredentials
 	}
 	return nil
+}
+
+// sessionRevoked reports whether a token issued at iat predates the account's
+// revocation cutoff. JWT iat has one-second precision, so the cutoff is
+// truncated to the second: a token minted in the same second as a logout or
+// password change survives (a window under one second, accepted by the spec),
+// which also lets a fresh login right after a logout work.
+func sessionRevoked(iat *jwt.NumericDate, validAfter *time.Time) bool {
+	if validAfter == nil {
+		return false
+	}
+	if iat == nil {
+		return true
+	}
+	return iat.Time.Before(validAfter.Truncate(time.Second))
+}
+
+// AuthorizeAdmin re-checks, on every request, what a valid signature alone
+// cannot: the admin still exists, is active, and the token was not revoked.
+func (s *AuthService) AuthorizeAdmin(ctx context.Context, c *AdminClaims) error {
+	a, err := s.adminRepo.GetByID(ctx, c.AdminID)
+	if err != nil {
+		if errors.Is(err, admin.ErrAdminNotFound) {
+			return admin.ErrInvalidToken
+		}
+		return err
+	}
+	if !a.IsActive || sessionRevoked(c.IssuedAt, a.SessionsValidAfter) {
+		return admin.ErrInvalidToken
+	}
+	return nil
+}
+
+// AuthorizeMerchant is AuthorizeAdmin for merchant dashboard tokens; it also
+// requires the parent merchant to be active.
+func (s *AuthService) AuthorizeMerchant(ctx context.Context, c *MerchantClaims) error {
+	if s.merchantUserRepo == nil {
+		return fmt.Errorf("merchant auth not configured")
+	}
+	u, err := s.merchantUserRepo.GetByID(ctx, c.UserID)
+	if err != nil {
+		if errors.Is(err, merchant.ErrMerchantUserNotFound) {
+			return merchant.ErrMerchantInvalidCredentials
+		}
+		return err
+	}
+	if !u.IsActive || sessionRevoked(c.IssuedAt, u.SessionsValidAfter) {
+		return merchant.ErrMerchantInvalidCredentials
+	}
+	if s.merchantRepo != nil {
+		m, err := s.merchantRepo.GetByID(ctx, u.MerchantID)
+		if err != nil {
+			if errors.Is(err, merchant.ErrMerchantNotFound) {
+				return merchant.ErrMerchantInvalidCredentials
+			}
+			return err
+		}
+		if !m.IsActive {
+			return merchant.ErrMerchantInvalidCredentials
+		}
+	}
+	return nil
+}
+
+func (s *AuthService) LogoutAdmin(ctx context.Context, adminID uuid.UUID) error {
+	return s.adminRepo.RevokeSessions(ctx, adminID, time.Now().UTC())
+}
+
+func (s *AuthService) LogoutMerchant(ctx context.Context, userID uuid.UUID) error {
+	if s.merchantUserRepo == nil {
+		return fmt.Errorf("merchant auth not configured")
+	}
+	return s.merchantUserRepo.RevokeSessions(ctx, userID, time.Now().UTC())
 }

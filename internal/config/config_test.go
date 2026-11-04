@@ -53,6 +53,10 @@ burst               = 30
 [rate_limit.sensitive]
 requests_per_minute = 10
 burst               = 6
+
+[rate_limit.api]
+requests_per_minute = 120
+burst               = 60
 `
 
 func writeConfig(t *testing.T, content string) string {
@@ -188,6 +192,22 @@ func TestLoad_MissingKeys(t *testing.T) {
 	}
 }
 
+// A config written before [rate_limit.api] existed must fail loudly rather
+// than start with an unlimited dashboard/payment-create bucket.
+func TestLoad_MissingRateLimitAPISection(t *testing.T) {
+	content := replaceOnce(t, validTOML, "\n[rate_limit.api]\nrequests_per_minute = 120\nburst               = 60\n", "")
+
+	_, err := Load(writeConfig(t, content))
+	if err == nil {
+		t.Fatal("expected missing-key error")
+	}
+	for _, want := range []string{"missing keys:", "rate_limit.api.burst", "rate_limit.api.requests_per_minute"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}
+
 func TestLoad_UnknownAndMissingReportedTogether(t *testing.T) {
 	content := replaceOnce(t, validTOML, `password = "db-pass-123"`, `paswrod = "db-pass-123"`)
 	path := writeConfig(t, content)
@@ -255,6 +275,9 @@ func TestLoad_Validation(t *testing.T) {
 				{`environment  = "development"`, `environment  = "production"`},
 				{`api_key    = ""`, `api_key    = "k"`},
 				{`secret_key = ""`, `secret_key = "s"`},
+				{`url          = "http://localhost:8090"`, `url          = "https://api.example.com"`},
+				{`frontend_url = "http://localhost:3000"`, `frontend_url = "https://app.example.com"`},
+				{`jwt_secret = "dev-jwt-secret"`, `jwt_secret = "` + strings.Repeat("k", 32) + `"`},
 			},
 		},
 		{
@@ -269,8 +292,14 @@ func TestLoad_Validation(t *testing.T) {
 		},
 		{
 			name:    "rate limit burst negative",
-			edits:   []edit{{`burst               = 6`, `burst               = -1`}},
+			edits:   []edit{{"burst               = 6\n", "burst               = -1\n"}},
 			wantErr: "rate_limit.sensitive.burst must be at least 1",
+		},
+		{
+			name: "api rate limit burst zero",
+			edits: []edit{{"[rate_limit.api]\nrequests_per_minute = 120\nburst               = 60\n",
+				"[rate_limit.api]\nrequests_per_minute = 120\nburst               = 0\n"}},
+			wantErr: "rate_limit.api.burst must be at least 1",
 		},
 		{
 			name:    "invalid trusted proxy CIDR",
@@ -300,6 +329,67 @@ func TestLoad_Validation(t *testing.T) {
 				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// productionTOML turns validTOML into a config that satisfies every
+// production rule, so each test below breaks exactly one rule.
+func productionTOML(t *testing.T) string {
+	t.Helper()
+	s := validTOML
+	s = replaceOnce(t, s, `environment  = "development"`, `environment  = "production"`)
+	s = replaceOnce(t, s, `url          = "http://localhost:8090"`, `url          = "https://api.example.com"`)
+	s = replaceOnce(t, s, `frontend_url = "http://localhost:3000"`, `frontend_url = "https://app.example.com"`)
+	s = replaceOnce(t, s, `api_key    = ""`, `api_key    = "cashi-api-key"`)
+	s = replaceOnce(t, s, `secret_key = ""`, `secret_key = "cashi-secret-key"`)
+	s = replaceOnce(t, s, `jwt_secret = "dev-jwt-secret"`, `jwt_secret = "`+strings.Repeat("k", 40)+`"`)
+	return s
+}
+
+func TestLoad_ProductionValidConfig(t *testing.T) {
+	if _, err := Load(writeConfig(t, productionTOML(t))); err != nil {
+		t.Fatalf("a fully valid production config must load: %v", err)
+	}
+}
+
+func TestLoad_HardenedValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		toml    func(t *testing.T) string
+		wantErr string
+	}{
+		{"typo in environment skips no check", func(t *testing.T) string {
+			return replaceOnce(t, productionTOML(t), `environment  = "production"`, `environment  = "prod"`)
+		}, `app.environment must be "development" or "production"`},
+		{"empty environment", func(t *testing.T) string {
+			return replaceOnce(t, validTOML, `environment  = "development"`, `environment  = ""`)
+		}, `app.environment must be "development" or "production"`},
+		{"short jwt secret in production", func(t *testing.T) string {
+			return replaceOnce(t, productionTOML(t), strings.Repeat("k", 40), strings.Repeat("k", 31))
+		}, "security.jwt_secret must be at least 32 characters in production"},
+		{"http app url in production", func(t *testing.T) string {
+			return replaceOnce(t, productionTOML(t), `url          = "https://api.example.com"`, `url          = "http://api.example.com"`)
+		}, "app.url must start with https:// in production"},
+		{"http frontend url in production", func(t *testing.T) string {
+			return replaceOnce(t, productionTOML(t), `frontend_url = "https://app.example.com"`, `frontend_url = "http://app.example.com"`)
+		}, "app.frontend_url must start with https:// in production"},
+		{"zero api rate limit", func(t *testing.T) string {
+			return replaceOnce(t, validTOML, "requests_per_minute = 120\nburst               = 60", "requests_per_minute = 0\nburst               = 60")
+		}, "rate_limit.api.requests_per_minute must be greater than 0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tc.toml(t)))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestLoad_DevelopmentMayUseHTTPAndShortSecret(t *testing.T) {
+	if _, err := Load(writeConfig(t, validTOML)); err != nil {
+		t.Fatalf("development config with http URLs and a short secret must load: %v", err)
 	}
 }
 

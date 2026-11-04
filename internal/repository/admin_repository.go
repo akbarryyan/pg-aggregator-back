@@ -22,7 +22,7 @@ func (r *AdminRepository) GetByEmail(ctx context.Context, email string) (*admin.
 	a := &admin.Admin{}
 
 	query := `
-		SELECT id, name, email, password_hash, is_active, last_login_at, created_at, updated_at
+		SELECT id, name, email, password_hash, is_active, last_login_at, created_at, updated_at, sessions_valid_after
 		FROM admins
 		WHERE email = $1
 	`
@@ -36,6 +36,7 @@ func (r *AdminRepository) GetByEmail(ctx context.Context, email string) (*admin.
 		&a.LastLoginAt,
 		&a.CreatedAt,
 		&a.UpdatedAt,
+		&a.SessionsValidAfter,
 	)
 	if err == sql.ErrNoRows {
 		return nil, admin.ErrAdminNotFound
@@ -51,7 +52,7 @@ func (r *AdminRepository) GetByID(ctx context.Context, id uuid.UUID) (*admin.Adm
 	a := &admin.Admin{}
 
 	query := `
-		SELECT id, name, email, password_hash, is_active, last_login_at, created_at, updated_at
+		SELECT id, name, email, password_hash, is_active, last_login_at, created_at, updated_at, sessions_valid_after
 		FROM admins
 		WHERE id = $1
 	`
@@ -65,6 +66,7 @@ func (r *AdminRepository) GetByID(ctx context.Context, id uuid.UUID) (*admin.Adm
 		&a.LastLoginAt,
 		&a.CreatedAt,
 		&a.UpdatedAt,
+		&a.SessionsValidAfter,
 	)
 	if err == sql.ErrNoRows {
 		return nil, admin.ErrAdminNotFound
@@ -93,7 +95,7 @@ func (r *AdminRepository) UpdatePasswordHash(ctx context.Context, id uuid.UUID, 
 	now := time.Now().UTC()
 	query := `
 		UPDATE admins
-		SET password_hash = $1, updated_at = $2
+		SET password_hash = $1, sessions_valid_after = $2, updated_at = $2
 		WHERE id = $3
 	`
 	result, err := r.db.ExecContext(ctx, query, passwordHash, now, id)
@@ -129,7 +131,7 @@ func (r *AdminRepository) UpdateProfile(ctx context.Context, id uuid.UUID, name,
 		UPDATE admins
 		SET name = $1, email = $2, updated_at = $3
 		WHERE id = $4
-		RETURNING id, name, email, password_hash, is_active, last_login_at, created_at, updated_at
+		RETURNING id, name, email, password_hash, is_active, last_login_at, created_at, updated_at, sessions_valid_after
 	`
 
 	a := &admin.Admin{}
@@ -142,6 +144,7 @@ func (r *AdminRepository) UpdateProfile(ctx context.Context, id uuid.UUID, name,
 		&a.LastLoginAt,
 		&a.CreatedAt,
 		&a.UpdatedAt,
+		&a.SessionsValidAfter,
 	)
 	if err == sql.ErrNoRows {
 		return nil, admin.ErrAdminNotFound
@@ -150,4 +153,22 @@ func (r *AdminRepository) UpdateProfile(ctx context.Context, id uuid.UUID, name,
 		return nil, fmt.Errorf("failed to update admin profile: %w", err)
 	}
 	return a, nil
+}
+
+// RevokeSessions invalidates every JWT issued before at (logout, password change).
+func (r *AdminRepository) RevokeSessions(ctx context.Context, id uuid.UUID, at time.Time) error {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE admins SET sessions_valid_after = $2, updated_at = $2 WHERE id = $1
+	`, id, at.UTC())
+	if err != nil {
+		return fmt.Errorf("failed to revoke admin sessions: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to read revoke result: %w", err)
+	}
+	if rows == 0 {
+		return admin.ErrAdminNotFound
+	}
+	return nil
 }

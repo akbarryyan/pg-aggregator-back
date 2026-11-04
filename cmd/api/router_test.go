@@ -293,11 +293,12 @@ func TestRouter_CreatePayment_Webhook_StatusPaid_EndToEnd(t *testing.T) {
 	authRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	publicRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	sensitiveRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
+	apiRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 
 	mux := setupRouter(
 		paymentHandler, webhookHandler,
 		nil, nil, nil, nil, // authHandler, adminHandler, merchantHandler, paymentLinkHandler — unused routes
-		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter,
+		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
 	)
 
 	// ---- 1. create payment via the real merchant-API-key-authed route ----
@@ -385,11 +386,12 @@ func TestRouter_CreatePayment_MissingAPIKey_Rejected(t *testing.T) {
 	authRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	publicRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	sensitiveRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
+	apiRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 
 	mux := setupRouter(
 		paymentHandler, webhookHandler,
 		nil, nil, nil, nil,
-		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter,
+		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
 	)
 
 	body, _ := json.Marshal(map[string]interface{}{
@@ -430,11 +432,12 @@ func TestRouter_LegacyUnauthenticatedProviderRoutingEndpoints_Removed(t *testing
 	authRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	publicRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	sensitiveRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
+	apiRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 
 	mux := setupRouter(
 		paymentHandler, webhookHandler,
 		nil, nil, nil, nil,
-		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter,
+		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
 	)
 
 	cases := []struct {
@@ -483,11 +486,12 @@ func TestRouter_ChangePassword_RateLimited(t *testing.T) {
 	publicRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	const burst = 3
 	sensitiveRateLimiter := middleware.NewIPRateLimiter(1, burst) // 1 req/min, burst 3
+	apiRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 
 	mux := setupRouter(
 		paymentHandler, webhookHandler,
 		authHandler, nil, nil, nil,
-		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter,
+		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
 	)
 
 	newReq := func() *http.Request {
@@ -532,11 +536,12 @@ func TestRouter_RequestID_WiredForEveryResponse(t *testing.T) {
 	authRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	publicRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 	sensitiveRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
+	apiRateLimiter := middleware.NewIPRateLimiter(1000, 1000)
 
 	mux := setupRouter(
 		paymentHandler, webhookHandler,
 		nil, nil, nil, nil,
-		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter,
+		authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter,
 	)
 
 	// No incoming ID → one must be generated, even for a route that 404s.
@@ -565,4 +570,125 @@ func TestRouter_RequestID_WiredForEveryResponse(t *testing.T) {
 
 func (f *fakePaymentRepo) ListReconcileCandidates(ctx context.Context, now time.Time, pendingWindow, expiredWindow time.Duration, limit int, after *payment.ReconcileCursor) ([]*payment.Payment, error) {
 	return nil, nil
+}
+
+// newLimiterRouter builds the real router with caller-chosen limiters. The
+// auth middlewares are real but backed by nothing (nil repos), which is fine:
+// every request below is rejected by auth, and the point is only whether the
+// limiter ran first.
+func newLimiterRouter(t *testing.T, publicL, apiL *middleware.IPRateLimiter) http.Handler {
+	t.Helper()
+	providerRouter := providerPkg.NewProviderRouter()
+	paymentService := service.NewPaymentService(
+		newFakePaymentRepo(), &fakeMerchantProviderConfigRepo{}, &fakeWebhookEventRepo{}, providerRouter, "http://localhost:8080",
+	)
+	authService := service.NewAuthService(nil, "test-secret")
+	open := middleware.NewIPRateLimiter(1000, 1000)
+	return setupRouter(
+		handler.NewPaymentHandler(paymentService, "http://localhost:3000"), handler.NewWebhookHandler(paymentService),
+		handler.NewAuthHandler(authService), nil, nil, nil,
+		middleware.NewAuthMiddleware(authService), middleware.NewMerchantAPIAuthMiddleware(service.NewMerchantAPIKeyService(nil, nil)),
+		open, publicL, open, apiL,
+	)
+}
+
+func serveFrom(mux http.Handler, method, path, token string) int {
+	req := httptest.NewRequest(method, path, bytes.NewReader([]byte(`{}`)))
+	req.RemoteAddr = "203.0.113.9:4444" // one fixed client so all requests share a bucket
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// TestRouter_DashboardRoutes_APILimiterRunsBeforeAuth: authenticated dashboard
+// routes are throttled per IP, and the limiter must sit in front of the JWT
+// check so a flood of forged tokens is rejected with 429 instead of paying
+// for token validation. Requests carry an INVALID token: within burst they
+// get 401 from auth; past burst they must get 429, which can only happen if
+// the limiter runs first.
+func TestRouter_DashboardRoutes_APILimiterRunsBeforeAuth(t *testing.T) {
+	const burst = 3
+	for _, path := range []string{"/api/v1/merchant/dashboard/summary", "/api/v1/admin/dashboard/summary"} {
+		t.Run(path, func(t *testing.T) {
+			mux := newLimiterRouter(t, middleware.NewIPRateLimiter(1000, 1000), middleware.NewIPRateLimiter(1, burst))
+			for i := 0; i < burst; i++ {
+				if code := serveFrom(mux, http.MethodGet, path, "forged-token"); code != http.StatusUnauthorized {
+					t.Fatalf("request %d: expected 401 from auth, got %d", i+1, code)
+				}
+			}
+			if code := serveFrom(mux, http.MethodGet, path, "forged-token"); code != http.StatusTooManyRequests {
+				t.Fatalf("request past burst: expected 429 before auth, got %d", code)
+			}
+		})
+	}
+}
+
+// TestRouter_CreatePayment_UsesAPILimiterSeparateFromPublic: checkout/status
+// polling shares publicRateLimiter, and must not be able to starve payment
+// creation (POST /payments), which has its own apiRateLimiter bucket — and
+// vice versa.
+func TestRouter_CreatePayment_UsesAPILimiterSeparateFromPublic(t *testing.T) {
+	const burst = 2
+	const statusPath = "/api/v1/payments/" + "00000000-0000-0000-0000-000000000001" + "/status"
+
+	t.Run("polling exhausting public does not block create", func(t *testing.T) {
+		mux := newLimiterRouter(t, middleware.NewIPRateLimiter(1, burst), middleware.NewIPRateLimiter(1000, 1000))
+		for i := 0; i < burst; i++ {
+			if code := serveFrom(mux, http.MethodGet, statusPath, ""); code != http.StatusUnauthorized {
+				t.Fatalf("poll %d: expected 401 (no key), got %d", i+1, code)
+			}
+		}
+		if code := serveFrom(mux, http.MethodGet, statusPath, ""); code != http.StatusTooManyRequests {
+			t.Fatalf("poll past burst: expected 429 from public limiter, got %d", code)
+		}
+		if code := serveFrom(mux, http.MethodPost, "/api/v1/payments", ""); code != http.StatusUnauthorized {
+			t.Fatalf("create after polling exhausted public: expected 401 (passes limiter, no key), got %d", code)
+		}
+	})
+
+	t.Run("create exhausting api does not block polling", func(t *testing.T) {
+		mux := newLimiterRouter(t, middleware.NewIPRateLimiter(1000, 1000), middleware.NewIPRateLimiter(1, burst))
+		for i := 0; i < burst; i++ {
+			if code := serveFrom(mux, http.MethodPost, "/api/v1/payments", ""); code == http.StatusTooManyRequests {
+				t.Fatalf("create %d: expected 401 (no key, passes limiter), got %d", i+1, code)
+			}
+		}
+		if code := serveFrom(mux, http.MethodPost, "/api/v1/payments", ""); code != http.StatusTooManyRequests {
+			t.Fatalf("create past burst: expected 429 from api limiter, got %d", code)
+		}
+		if code := serveFrom(mux, http.MethodGet, statusPath, ""); code != http.StatusUnauthorized {
+			t.Fatalf("poll after create exhausted api: expected 401 (passes limiter), got %d", code)
+		}
+	})
+}
+
+// TestRouter_AccountRoutes_APILimiterRunsBeforeHandlerAuth: the account routes
+// authenticate inside AuthHandler (DB lookups), so without the api limiter in
+// front a flood of forged tokens would hit the database unthrottled.
+func TestRouter_AccountRoutes_APILimiterRunsBeforeHandlerAuth(t *testing.T) {
+	const burst = 3
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/auth/me"},
+		{http.MethodPut, "/api/v1/auth/profile"},
+		{http.MethodPost, "/api/v1/auth/logout"},
+		{http.MethodGet, "/api/v1/auth/admin/me"},
+		{http.MethodPut, "/api/v1/auth/admin/profile"},
+		{http.MethodPost, "/api/v1/auth/admin/logout"},
+	}
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			mux := newLimiterRouter(t, middleware.NewIPRateLimiter(1000, 1000), middleware.NewIPRateLimiter(1, burst))
+			for i := 0; i < burst; i++ {
+				if code := serveFrom(mux, rt.method, rt.path, "forged-token"); code != http.StatusUnauthorized {
+					t.Fatalf("request %d within burst: expected 401 from handler auth, got %d", i+1, code)
+				}
+			}
+			if code := serveFrom(mux, rt.method, rt.path, "forged-token"); code != http.StatusTooManyRequests {
+				t.Fatalf("request past burst: expected 429, got %d", code)
+			}
+		})
+	}
 }

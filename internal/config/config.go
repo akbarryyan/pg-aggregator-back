@@ -67,6 +67,9 @@ type RateLimitConfig struct {
 	Auth           RateLimitRule `toml:"auth"`
 	Public         RateLimitRule `toml:"public"`
 	Sensitive      RateLimitRule `toml:"sensitive"`
+	// API throttles JWT-authenticated dashboard/admin routes and API-key
+	// payment creation (they were previously unlimited).
+	API RateLimitRule `toml:"api"`
 }
 
 type RateLimitRule struct {
@@ -93,6 +96,10 @@ func (r RateLimitConfig) TrustedProxyPrefixes() ([]netip.Prefix, error) {
 // placeholderJWTSecret is the value shipped in .config.example.toml;
 // Validate rejects it in production.
 const placeholderJWTSecret = "change-this-secret"
+
+// minProductionJWTSecretLen is the shortest HS256 signing secret accepted in
+// production; shorter secrets are brute-forceable.
+const minProductionJWTSecretLen = 32
 
 // Load reads the TOML config at path. There are no defaults: every key
 // declared on Config must be present in the file (an explicit "" is fine
@@ -219,6 +226,14 @@ func (c *Config) Validate() error {
 		return errors.New("app.frontend_url is required")
 	}
 
+	switch c.App.Environment {
+	case "development", "production":
+	default:
+		// A typo such as "prod" would otherwise silently skip every
+		// production-only check below.
+		return errors.New(`app.environment must be "development" or "production"`)
+	}
+
 	if c.DB.Host == "" || c.DB.Name == "" {
 		return errors.New("db.host and db.name are required")
 	}
@@ -240,6 +255,7 @@ func (c *Config) Validate() error {
 		{"auth", c.RateLimit.Auth},
 		{"public", c.RateLimit.Public},
 		{"sensitive", c.RateLimit.Sensitive},
+		{"api", c.RateLimit.API},
 	} {
 		if r.rule.RequestsPerMinute <= 0 {
 			return fmt.Errorf("rate_limit.%s.requests_per_minute must be greater than 0", r.name)
@@ -257,6 +273,17 @@ func (c *Config) Validate() error {
 		}
 		if c.Security.JWTSecret == placeholderJWTSecret {
 			return errors.New("security.jwt_secret must be changed in production")
+		}
+		if len(c.Security.JWTSecret) < minProductionJWTSecretLen {
+			return errors.New("security.jwt_secret must be at least 32 characters in production")
+		}
+		for _, u := range []struct{ name, value string }{
+			{"app.url", c.App.URL},
+			{"app.frontend_url", c.App.FrontendURL},
+		} {
+			if !strings.HasPrefix(strings.ToLower(u.value), "https://") {
+				return fmt.Errorf("%s must start with https:// in production", u.name)
+			}
 		}
 	}
 

@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/google/uuid"
@@ -78,5 +81,76 @@ func TestMerchantHandler_GetDashboardSummary_RequiresMerchantContext(t *testing.
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without merchant context, got %d", rec.Code)
+	}
+}
+
+// webhookSecretRepo is a merchant repo that records the stored webhook secret
+// so tests can prove whether a regenerate request changed it.
+type webhookSecretRepo struct{ m *merchant.Merchant }
+
+func (r *webhookSecretRepo) GetByID(ctx context.Context, id uuid.UUID) (*merchant.Merchant, error) {
+	return r.m, nil
+}
+
+func (r *webhookSecretRepo) SetWebhookSecret(ctx context.Context, id uuid.UUID, secret string) error {
+	r.m.WebhookSecret = &secret
+	return nil
+}
+
+func TestMerchantHandler_RegenerateWebhookSecret_RequiresPassword(t *testing.T) {
+	const oldSecret = "old-secret"
+	merchantID, userID := uuid.New(), uuid.New()
+	m := &merchant.Merchant{ID: merchantID, IsActive: true, WebhookSecret: func() *string { s := oldSecret; return &s }()}
+	repo := &webhookSecretRepo{m: m}
+	user := &merchant.User{ID: userID, MerchantID: merchantID, Email: "u@example.com", PasswordHash: mustHash(t, "correct-password"), Role: "owner", IsActive: true}
+
+	paymentSvc := service.NewPaymentService(newFakePaymentRepo(), &fakeMerchantProviderConfigRepo{}, newFakeWebhookEventRepo(), providerPkg.NewProviderRouter(), "http://localhost:8080").
+		WithMerchantCallbackDeps(repo, nil)
+	authSvc := service.NewAuthService(newFakeAdminRepo(), testJWTSecret).
+		WithMerchantAuth(newFakeMerchantUserRepo(user), newFakeAuthMerchantRepo(m))
+	h := NewMerchantHandler(paymentSvc, nil, authSvc, "http://localhost:3000")
+
+	call := func(body string) *httptest.ResponseRecorder {
+		ctx := context.WithValue(context.Background(), middleware.MerchantIDContextKey, merchantID)
+		ctx = context.WithValue(ctx, middleware.MerchantUserIDContextKey, userID)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/merchant/webhook-secret/regenerate", strings.NewReader(body)).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.RegenerateWebhookSecret(rec, req)
+		return rec
+	}
+
+	tests := []struct {
+		name        string
+		body        string
+		wantCode    int
+		wantMessage string
+		wantChanged bool
+	}{
+		{"empty body", ``, http.StatusBadRequest, "Invalid request body", false},
+		{"empty password", `{"password":"  "}`, http.StatusBadRequest, "Password is required to regenerate webhook secret", false},
+		{"missing password field", `{}`, http.StatusBadRequest, "Password is required to regenerate webhook secret", false},
+		{"wrong password", `{"password":"nope"}`, http.StatusUnauthorized, "Invalid password", false},
+		{"correct password", `{"password":"correct-password"}`, http.StatusOK, "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := call(tc.body)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("expected %d, got %d: %s", tc.wantCode, rec.Code, rec.Body.String())
+			}
+			if tc.wantMessage != "" && !strings.Contains(rec.Body.String(), tc.wantMessage) {
+				t.Errorf("expected body to contain %q, got %s", tc.wantMessage, rec.Body.String())
+			}
+			changed := *m.WebhookSecret != oldSecret
+			if changed != tc.wantChanged {
+				t.Errorf("secret changed = %v, want %v", changed, tc.wantChanged)
+			}
+			if tc.wantChanged {
+				var resp map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp["webhook_secret"] != *m.WebhookSecret || resp["webhook_secret"] == "" {
+					t.Errorf("response should carry the new stored secret, got %s", rec.Body.String())
+				}
+			}
+		})
 	}
 }

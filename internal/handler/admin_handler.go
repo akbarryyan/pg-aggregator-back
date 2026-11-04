@@ -166,9 +166,11 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 			payment.ErrInvalidExpiration,
 			payment.ErrInvalidEnvironment:
 			respondError(w, http.StatusBadRequest, err.Error())
+		case merchant.ErrMerchantInactive:
+			respondError(w, http.StatusForbidden, "Merchant account is inactive")
 		default:
 			logger.ErrorfCtx(r.Context(), "Failed to create payment from admin: %v", err)
-			respondError(w, http.StatusInternalServerError, err.Error())
+			respondError(w, http.StatusInternalServerError, "Failed to create payment")
 		}
 		return
 	}
@@ -177,6 +179,7 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AdminHandler) ExportPayments(w http.ResponseWriter, r *http.Request) {
+	extendWriteDeadline(w, exportWriteTimeout)
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	dateFrom, dateTo, ok := parseDateRangeQuery(w, r)
@@ -336,6 +339,7 @@ func (h *AdminHandler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AdminHandler) ExportMerchants(w http.ResponseWriter, r *http.Request) {
+	extendWriteDeadline(w, exportWriteTimeout)
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 
@@ -960,6 +964,7 @@ func (h *AdminHandler) RetryCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AdminHandler) ExportLogs(w http.ResponseWriter, r *http.Request) {
+	extendWriteDeadline(w, exportWriteTimeout)
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	providerName := strings.TrimSpace(r.URL.Query().Get("provider"))
 	processed := strings.TrimSpace(r.URL.Query().Get("processed"))

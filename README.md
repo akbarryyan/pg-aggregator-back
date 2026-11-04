@@ -80,10 +80,12 @@ Deploy ke VPS: [DEPLOY.md](DEPLOY.md).
 | Key | Keterangan |
 |---|---|
 | `app.url`, `app.frontend_url` | Wajib diisi — `config.Validate()` gagal start kalau kosong |
-| `security.jwt_secret` | Tidak boleh kosong; wajib diganti di production (`app.environment = "production"` menolak `change-this-secret`) |
+| `app.environment` | Persis `development` atau `production`; nilai lain ditolak |
+| `security.jwt_secret` | Tidak boleh kosong. Di production (`app.environment = "production"`): minimal 32 karakter dan bukan placeholder `change-this-secret` |
+| (production) `app.url`, `app.frontend_url` | Di production wajib berawalan `https://` — kalau tidak, server menolak start |
 | `cashi.api_key` / `cashi.secret_key` | Wajib di production; sandbox merchant tidak butuh ini (mock, tanpa HTTP call) |
 | `[db]` | Koneksi PostgreSQL (`host = "postgres"`); `password` sama dengan isi `db_password`; script migrate/seed membacanya lewat `configenv` |
-| `[rate_limit]` | Batas request per IP (auth/public/sensitive) dan `trusted_proxies` — CIDR proxy yang `X-Forwarded-For`-nya dipercaya (`[]` lokal, `["10.89.0.2/32"]` di VPS) |
+| `[rate_limit]` | Batas request per IP (`auth`, `public`, `sensitive`, `api` — keempat sub-section wajib ada) dan `trusted_proxies` — CIDR proxy yang `X-Forwarded-For`-nya dipercaya (`[]` lokal, `["10.89.0.2/32"]` di VPS) |
 
 Error config (key hilang, key tidak dikenal, sintaks) hanya menyebut nama
 key dan nomor baris, tidak pernah nilainya, karena file ini berisi secret.
@@ -131,19 +133,20 @@ keduanya tidak bisa dipakai bertukar. Endpoint publik (checkout,
 payment-link publik, webhook provider) tidak memakai JWT/API key sama
 sekali, tapi tetap melewati rate limiter per-IP.
 
-Tiga tingkat rate limiter per-IP (`internal/middleware/rate_limit.go`):
+Empat tingkat rate limiter per-IP (`internal/middleware/rate_limit.go`):
 
-Nilai default di bawah diatur di `[rate_limit]` pada `.config.toml`; di belakang Caddy, IP klien diambil dari `X-Forwarded-For` hanya jika koneksi datang dari `trusted_proxies`.
+Nilai default di bawah diatur di `[rate_limit.auth|public|sensitive|api]` pada `.config.toml` (section `[rate_limit.api]` wajib ada; tanpanya API gagal start); di belakang Caddy, IP klien diambil dari `X-Forwarded-For` hanya jika koneksi datang dari `trusted_proxies`.
 
 | Limiter | Rate | Dipakai untuk |
 |---|---|---|
 | `authRateLimiter` | 5 req/min | Login (admin & merchant) — target klasik brute-force |
 | `sensitiveRateLimiter` | 10 req/min | Aksi mutasi akun setelah lolos auth: change-password, create/rotate/revoke API key, regenerate webhook secret — sebelumnya endpoint ini tidak dibatasi sama sekali setelah token JWT tervalidasi |
-| `publicRateLimiter` | 120 req/min | Endpoint publik (checkout, payment-link, webhook provider, merchant API key) — trafik legit frekuensi tinggi, cuma untuk meredam flood |
+| `publicRateLimiter` | 120 req/min | Endpoint publik (checkout, payment-link, webhook provider, `GET /payments/{id}` dan `/status` dengan API key) — trafik legit frekuensi tinggi, cuma untuk meredam flood |
+| `apiRateLimiter` | 120 req/min (burst 60) | Route `/admin/*` dan `/merchant/*` (JWT) serta `POST /payments` (API key) — dipasang sebelum pengecekan auth yang menyentuh DB. Bucket sendiri, terpisah dari `publicRateLimiter`, supaya polling status tidak menghabiskan jatah create |
 
 ## Routes (ringkas)
 
-> Kontrak API lengkap (semua 61 route, request/response schema, auth per
+> Kontrak API lengkap (semua 63 route, request/response schema, auth per
 > endpoint) ada di [docs/openapi.yaml](docs/openapi.yaml) — OpenAPI 3.0,
 > bisa dibuka di [Swagger Editor](https://editor.swagger.io) atau tool
 > serupa. Dibuat dari route table `main.go` + domain struct sesungguhnya,
@@ -153,12 +156,55 @@ Semua di bawah prefix `/api/v1`:
 
 - `POST /auth/login`, `/auth/register`, `/auth/admin/login` — rate limited (5 req/min)
 - `GET|PUT /auth/me`, `/auth/profile`, `/auth/change-password` (+ varian `/admin/*`) — `change-password` rate limited (10 req/min)
+- `POST /auth/logout`, `/auth/admin/logout` — mencabut semua token sesi akun itu (lihat bawah)
 - `/admin/*` — protected admin panel API (dashboard, payments, merchants, providers, routing, reconciliation, callbacks, logs)
 - `/merchant/*` — protected merchant dashboard API (dashboard, payments, api-keys, payment-links, webhook secret)
 - `GET /public/payments/by-reference/{reference}` — publik, untuk halaman checkout
 - `GET /public/payment-links/{slug}`, `POST /public/payment-links/{slug}/pay` — publik
 - `POST /payments`, `GET /payments/{id}`, `GET /payments/{id}/status` — merchant API key
 - `POST /provider-webhooks/{providerName}` — webhook provider, rate limited per-IP
+
+### Idempotency-Key (`POST /payments`)
+
+`POST /payments` (API key) dan pembuatan payment dari dashboard
+(`POST /merchant/payments`) menerima header opsional `Idempotency-Key`: 1-128
+karakter ASCII tercetak (0x21-0x7E), berlaku per merchant + environment selama
+24 jam. Pembuatan payment via payment link dan via admin tidak memakainya.
+
+```bash
+curl -X POST http://localhost:8090/api/v1/payments \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 0b0e7a53-6f0c-4d4a-9a55-2f5d2a1c9e11" \
+  -d '{"amount": 10000, "currency": "IDR", "payment_method": "qris", "description": "INV-001"}'
+```
+
+Gunakan UUID baru per niat bayar, dan ulangi kunci yang sama saat retry
+(timeout, koneksi putus). Hasilnya:
+
+| Situasi | Respons |
+|---|---|
+| Kunci baru | `201`, payment dibuat |
+| Kunci sama, request sama | `201` dengan header `Idempotent-Replayed: true`; isinya kondisi payment **saat ini** (bisa sudah `paid`), bukan salinan beku |
+| Kunci sama, request pertama masih diproses | `409` — coba lagi sebentar lagi (klaim tanpa payment dianggap terbengkalai setelah 2 menit) |
+| Kunci sama, tapi isi request berbeda | `422` |
+| Kunci tidak valid (kosong, >128, bukan ASCII tercetak) | `400` |
+
+Klaim kunci dicatat di tabel `idempotency_keys` sebelum provider dipanggil dan
+dihapus job `purge-idempotency-keys` (tiap 1 jam) setelah lewat 24 jam. Merchant
+yang dinonaktifkan mendapat `403` saat membuat payment.
+
+### Sesi, logout, dan batas ukuran body
+
+- Token JWT dicabut di sisi server: `POST /auth/logout` dan
+  `POST /auth/admin/logout` mencabut **semua** token milik akun itu (bukan
+  hanya token yang dikirim), dan **ganti password** juga mencabut semua token
+  yang ada. Token yang dicabut, atau milik akun yang nonaktif, ditolak `401`
+  `Invalid or expired token` (kolom `sessions_valid_after`, migration `018`).
+- `POST /merchant/webhook-secret/regenerate` kini wajib body `{"password": "..."}`
+  (`400` bila kosong, `401` bila salah); membaca secret
+  (`GET /merchant/webhook-secret`) tidak memerlukan password.
+- Body request dibatasi 1 MiB. Webhook provider menjawab `413` bila melebihi;
+  endpoint JSON lain menjawab `400 Invalid request body`.
 
 ## Logging
 
@@ -243,6 +289,8 @@ Dijalankan sebagai goroutine ticker in-process di `main.go`
   terbaru
 - `deliver-merchant-callbacks` (tiap 5 detik) — kirim callback merchant yang
   antre dan jadwalkan ulang yang gagal
+- `purge-idempotency-keys` (tiap 1 jam) — hapus klaim `Idempotency-Key` yang
+  lebih tua dari 24 jam (tabel dibuat migration `017`)
 - `rate-limiter-cleanup` (tiap 10 menit) — bersihkan bucket rate limit idle
 
 Saat shutdown, server menunggu job yang sedang berjalan selesai (maks. 15

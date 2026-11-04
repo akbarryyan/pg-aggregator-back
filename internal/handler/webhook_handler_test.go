@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -249,5 +250,28 @@ func TestWebhookHandler_HandleProviderWebhook_ProviderMismatchIs400(t *testing.T
 	}
 	if got, _ := paymentRepo.GetByID(context.Background(), p.ID); got.Status != payment.StatusPending {
 		t.Errorf("status = %q, want pending", got.Status)
+	}
+}
+
+// TestWebhookHandler_HandleProviderWebhook_BodyTooLargeIs413 covers the body
+// cap: the webhook is unauthenticated and reads the whole body before the
+// signature check, so an oversized body must be refused with 413 and no
+// internal error text.
+func TestWebhookHandler_HandleProviderWebhook_BodyTooLargeIs413(t *testing.T) {
+	svc, _ := newTestWebhookService(&fakeProvider{name: "testprov"})
+	h := NewWebhookHandler(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/provider-webhooks/testprov", nil)
+	req.Body = http.MaxBytesReader(rec, io.NopCloser(strings.NewReader(strings.Repeat("a", 64))), 16)
+	req = mux.SetURLVars(req, map[string]string{"providerName": "testprov"})
+
+	h.HandleProviderWebhook(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "http: request body too large") {
+		t.Errorf("response leaks internal error text: %s", rec.Body.String())
 	}
 }

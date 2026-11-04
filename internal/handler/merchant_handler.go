@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -184,6 +185,7 @@ func (h *MerchantHandler) ListPayments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MerchantHandler) ExportPayments(w http.ResponseWriter, r *http.Request) {
+	extendWriteDeadline(w, exportWriteTimeout)
 	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
 	if !ok {
 		respondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -299,16 +301,24 @@ func (h *MerchantHandler) CreatePayment(w http.ResponseWriter, r *http.Request) 
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	p, err := h.paymentService.CreatePayment(r.Context(), &req)
+	idemKey, err := idempotencyKeyFromRequest(r)
 	if err != nil {
-		if respondInvalidCallbackURL(w, err) {
+		respondIdempotencyError(w, err)
+		return
+	}
+	res, err := h.paymentService.CreatePaymentIdempotent(r.Context(), &req, idemKey)
+	if err != nil {
+		if respondInvalidCallbackURL(w, err) || respondIdempotencyError(w, err) {
 			return
 		}
 		logger.ErrorfCtx(r.Context(), "merchant create payment: %v", err)
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondCreatePaymentError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusCreated, payment.ToPaymentResponse(p, h.frontendURL))
+	if res.Replayed {
+		w.Header().Set("Idempotent-Replayed", "true")
+	}
+	respondJSON(w, http.StatusCreated, payment.ToPaymentResponse(res.Payment, h.frontendURL))
 }
 
 func (h *MerchantHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
@@ -432,7 +442,17 @@ func (h *MerchantHandler) UpdateBusiness(w http.ResponseWriter, r *http.Request)
 		if respondInvalidCallbackURL(w, err) {
 			return
 		}
-		respondError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, merchant.ErrMerchantNotFound) {
+			respondError(w, http.StatusNotFound, "Merchant not found")
+			return
+		}
+		if !errors.Is(err, merchant.ErrMerchantNameRequired) && !errors.Is(err, merchant.ErrBusinessNameRequired) {
+			logger.ErrorfCtx(r.Context(), "merchant update business: %v", err)
+		}
+		respondValidationOrInternal(w, err,
+			merchant.ErrMerchantNameRequired,
+			merchant.ErrBusinessNameRequired,
+		)
 		return
 	}
 	respondJSON(w, http.StatusOK, m)
@@ -456,11 +476,34 @@ func (h *MerchantHandler) GetWebhookSecret(w http.ResponseWriter, r *http.Reques
 }
 
 // RegenerateWebhookSecret issues a new signing secret, invalidating the
-// previous one immediately.
+// previous one immediately. It requires the account password, like API-key
+// rotation, because it breaks every callback verifier on the merchant's side.
 func (h *MerchantHandler) RegenerateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
 	if !ok {
 		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	userID, ok := middleware.MerchantUserIDFromContext(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		respondError(w, http.StatusBadRequest, "Password is required to regenerate webhook secret")
+		return
+	}
+	// Regenerating invalidates the old secret at once, so every callback we send
+	// stops verifying on the merchant's side: re-authenticate like API-key rotation.
+	if err := h.authService.VerifyMerchantPassword(r.Context(), userID, req.Password); err != nil {
+		respondError(w, http.StatusUnauthorized, "Invalid password")
 		return
 	}
 	secret, err := h.paymentService.RegenerateMerchantWebhookSecret(r.Context(), merchantID)

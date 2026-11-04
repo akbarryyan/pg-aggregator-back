@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/idempotency"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/paymentlink"
@@ -513,6 +514,10 @@ type fakeProvider struct {
 func (f *fakeProvider) GetName() string { return f.name }
 
 func (f *fakeProvider) CreatePayment(ctx context.Context, req *domainProvider.ProviderPaymentRequest) (*domainProvider.ProviderPaymentResponse, error) {
+	// Like the real HTTP client (NewRequestWithContext), fail on a cancelled ctx.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.createCalls++
 	if f.createRaw != nil {
 		return f.createRaw()
@@ -754,4 +759,100 @@ func reconcileOrderBefore(aAt time.Time, aID uuid.UUID, bAt time.Time, bID uuid.
 		return aAt.After(bAt)
 	}
 	return bytes.Compare(aID[:], bID[:]) > 0
+}
+
+// ---- fakeIdempotencyRepo ---------------------------------------------------
+
+// fakeIdempotencyRepo mirrors the SQL rules of repository.IdempotencyRepository:
+// one row per merchant|env|key; a conflicting row is taken over only when past
+// idempotency.TTL, or without a payment and past idempotency.AbandonedAfter.
+type fakeIdempotencyRepo struct {
+	mu   sync.Mutex
+	rows map[string]*idempotency.Record
+
+	claimCalls  int
+	purgeCutoff time.Time
+	purgeCalls  int
+	// completeErr, when set, makes Complete fail without linking the payment.
+	completeErr error
+}
+
+func newFakeIdempotencyRepo() *fakeIdempotencyRepo {
+	return &fakeIdempotencyRepo{rows: map[string]*idempotency.Record{}}
+}
+
+func idemKey(merchantID uuid.UUID, env, key string) string {
+	return merchantID.String() + "|" + env + "|" + key
+}
+
+func (f *fakeIdempotencyRepo) Claim(
+	ctx context.Context, merchantID uuid.UUID, environment, key, requestHash string, now time.Time,
+) (*idempotency.Record, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claimCalls++
+	k := idemKey(merchantID, environment, key)
+	if ex, ok := f.rows[k]; ok {
+		expired := ex.CreatedAt.Before(now.Add(-idempotency.TTL))
+		abandoned := ex.PaymentID == nil && ex.CreatedAt.Before(now.Add(-idempotency.AbandonedAfter))
+		if !expired && !abandoned {
+			cp := *ex
+			return &cp, false, nil
+		}
+	}
+	rec := &idempotency.Record{ID: uuid.New(), MerchantID: merchantID, Environment: environment,
+		Key: key, RequestHash: requestHash, CreatedAt: now}
+	f.rows[k] = rec
+	cp := *rec
+	return &cp, true, nil
+}
+
+func (f *fakeIdempotencyRepo) Complete(ctx context.Context, id, paymentID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.completeErr != nil {
+		return f.completeErr
+	}
+	for _, r := range f.rows {
+		if r.ID == id {
+			pid := paymentID
+			r.PaymentID = &pid
+			return nil
+		}
+	}
+	return idempotency.ErrClaimLost
+}
+
+func (f *fakeIdempotencyRepo) Release(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, r := range f.rows {
+		if r.ID == id && r.PaymentID == nil {
+			delete(f.rows, k)
+		}
+	}
+	return nil
+}
+
+func (f *fakeIdempotencyRepo) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.purgeCalls++
+	f.purgeCutoff = cutoff
+	var n int64
+	for k, r := range f.rows {
+		if r.CreatedAt.Before(cutoff) {
+			delete(f.rows, k)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// seed inserts a claim directly (e.g. an in-flight one with no payment).
+func (f *fakeIdempotencyRepo) seed(merchantID uuid.UUID, env, key, hash string, createdAt time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rows[idemKey(merchantID, env, key)] = &idempotency.Record{ID: uuid.New(), MerchantID: merchantID,
+		Environment: env, Key: key, RequestHash: hash, CreatedAt: createdAt}
 }

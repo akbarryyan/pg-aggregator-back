@@ -10,6 +10,14 @@ info:
     handler/service/domain source — not hand-guessed. See
     [docs/payment-state-machine.md](payment-state-machine.md) for the
     payment status lifecycle these endpoints read and write.
+
+    Request bodies are capped at 1 MiB. Only the provider webhook answers an
+    oversize body with 413; other JSON endpoints answer 400 `Invalid request
+    body`.
+
+    Session tokens (admin and merchant JWTs) are revoked server-side: logout
+    and changing the password invalidate every token issued before that
+    moment, and an inactive account's token is rejected with 401.
   version: "1.0"
   license:
     name: Proprietary
@@ -85,6 +93,18 @@ paths:
         '409': { description: Email already registered, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
+  /auth/logout:
+    post:
+      tags: [Auth (Merchant)]
+      summary: Sign out (revoke every existing merchant session token)
+      description: |
+        Revokes ALL tokens issued to this user before now (not only the one
+        sent), on every device. Response `{"message":"Signed out"}`.
+      security: [{ merchantBearer: [] }]
+      responses:
+        '200': { description: Signed out }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /auth/me:
     get:
       tags: [Auth (Merchant)]
@@ -112,7 +132,9 @@ paths:
       summary: Change merchant user password
       description: |
         Rate limited 10 req/min per IP (project backlog #8) — previously
-        unlimited once past JWT auth.
+        unlimited once past JWT auth. A successful change revokes every
+        existing token of this user (including the one used for this call);
+        log in again.
       security: [{ merchantBearer: [] }]
       requestBody:
         content:
@@ -144,6 +166,18 @@ paths:
         '403': { description: Admin inactive }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
+  /auth/admin/logout:
+    post:
+      tags: [Auth (Admin)]
+      summary: Sign out (revoke every existing admin session token)
+      description: |
+        Revokes ALL tokens issued to this admin before now, on every device.
+        Response `{"message":"Signed out"}`.
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Signed out }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /auth/admin/me:
     get:
       tags: [Auth (Admin)]
@@ -169,7 +203,10 @@ paths:
     post:
       tags: [Auth (Admin)]
       summary: Change admin password
-      description: Rate limited 10 req/min per IP (project backlog #8).
+      description: |
+        Rate limited 10 req/min per IP (project backlog #8). A successful
+        change revokes every existing token of this admin (including the one
+        used for this call); log in again.
       security: [{ adminBearer: [] }]
       requestBody:
         content:
@@ -682,12 +719,25 @@ paths:
     post:
       tags: [Merchant Dashboard]
       summary: Create a payment from the dashboard
+      description: |
+        Supports the optional `Idempotency-Key` header with the same
+        semantics as `POST /payments`. A deactivated merchant gets 403.
       security: [{ merchantBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         content: { application/json: { schema: { $ref: '#/components/schemas/CreatePaymentRequest' } } }
       responses:
-        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '201':
+          description: Created (or replayed — see `Idempotent-Replayed`)
+          headers:
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } }
+        '400': { description: Invalid request or malformed Idempotency-Key, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Merchant account is inactive, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: A request with this Idempotency-Key is still being processed (retry shortly), content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Idempotency-Key was already used with a different request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
 
   /merchant/payments/export:
     get:
@@ -773,7 +823,7 @@ paths:
       summary: Get (or lazily generate) the outbound webhook HMAC signing secret
       security: [{ merchantBearer: [] }]
       responses:
-        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { secret: { type: string } } } } } }
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { webhook_secret: { type: string } } } } } }
 
   /merchant/webhook-secret/regenerate:
     post:
@@ -782,10 +832,23 @@ paths:
       description: |
         Invalidates the previous secret immediately. Rate limited 10
         req/min per IP (project backlog #8) — previously unlimited once
-        past JWT auth.
+        past JWT auth. Requires the account password (like API key
+        rotation) because every callback verifier on the merchant's side
+        breaks; reading the secret (`GET /merchant/webhook-secret`) does not.
       security: [{ merchantBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, description: The merchant user's current password }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { secret: { type: string } } } } } }
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { webhook_secret: { type: string } } } } } }
+        '400': { description: Invalid body or password missing/blank, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: Wrong password (message Invalid password) or missing/invalid token, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   # ---------------------------------------------------------------- Merchant Payment Links
@@ -912,14 +975,31 @@ paths:
         forced from the authenticated API key
         (see MerchantAPIAuthMiddleware) so a caller can never forge
         another merchant's ID.
+
+        Supports the optional `Idempotency-Key` header (see the parameter):
+        retrying with the same key never creates a second payment. A replay
+        returns 201 with the payment's current state and
+        `Idempotent-Replayed: true`. Payment-link checkout and admin payment
+        creation do not use idempotency keys.
+
+        Rate limited by the `[rate_limit.api]` bucket (default 120 req/min
+        per IP), separate from the bucket shared by the GET endpoints.
       security: [{ apiKey: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         content: { application/json: { schema: { $ref: '#/components/schemas/CreatePaymentRequest' } } }
       responses:
-        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '201':
+          description: Created (or replayed — see `Idempotent-Replayed`)
+          headers:
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } }
+        '400': { description: Invalid request or malformed Idempotency-Key, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '401': { description: Missing/invalid/revoked API key }
-        '403': { description: Merchant inactive }
+        '403': { description: Merchant inactive (rejected at authentication and again on creation) }
+        '409': { description: A request with this Idempotency-Key is still being processed (retry shortly), content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Idempotency-Key was already used with a different request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '502': { description: Provider error }
         '503': { description: Provider unavailable }
         '429': { $ref: '#/components/responses/TooManyRequests' }
@@ -967,6 +1047,7 @@ paths:
       responses:
         '200': { description: Processed, or acknowledged without a status change (ignored) }
         '400': { description: Invalid payload / signature validation failed / unregistered provider / unknown order / provider does not own the payment }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '502': { description: Settlement not yet confirmed by the provider — retry later }
 
@@ -999,6 +1080,24 @@ components:
         `Authorization: Bearer <key>` (see MerchantAPIAuthMiddleware).
 
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional. 1-128 visible ASCII characters (0x21-0x7E). Scoped per
+        merchant + environment and remembered for 24 hours. Use a fresh UUID
+        per payment intent and resend the same key when retrying.
+
+        - Same key, same request: no second payment is created; the response
+          is the payment's CURRENT state (it may have moved on from pending)
+          with `Idempotent-Replayed: true`.
+        - Same key while the first request is still being processed: 409
+          (retry shortly). A claim that never produced a payment is treated
+          as abandoned after 2 minutes.
+        - Same key with a different request body: 422.
+        - Malformed key: 400.
+      schema: { type: string, minLength: 1, maxLength: 128 }
     PathID:
       name: id
       in: path
@@ -1013,15 +1112,23 @@ components:
       in: query
       schema: { type: integer, default: 0 }
 
+  headers:
+    IdempotentReplayed:
+      description: Present with value `true` when the response is a replay of an earlier request that used the same `Idempotency-Key`.
+      schema: { type: string, enum: ['true'] }
+
   responses:
     BadRequest:
       description: Invalid request
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     Unauthorized:
-      description: Missing or invalid authorization
+      description: Missing or invalid authorization (including a token revoked by logout/password change, or an inactive account; message "Invalid or expired token")
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     NotFound:
       description: Not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    PayloadTooLarge:
+      description: Request body exceeds the 1 MiB limit
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     TooManyRequests:
       description: Rate limit exceeded (per-IP)

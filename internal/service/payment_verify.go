@@ -27,9 +27,10 @@ func (s *PaymentService) checkProviderStatus(ctx context.Context, prov providerP
 
 // verifyProviderPayment decides whether a provider status report is enough to
 // mark p paid: the provider must report it settled, and its amount — and the
-// webhook's, when the webhook carries one — must equal the gross amount we
-// stored. Provider fees (e.g. Cashi's 0.7%) are deducted at settlement and
-// never change what the customer paid. An unknown provider amount fails
+// webhook's, when the webhook carries one — must equal the gross amount the
+// customer was asked to pay: the merchant's nominal plus any fee added on top
+// (0 when the merchant bears it). Provider fees (e.g. Cashi's 0.7%) are
+// deducted at settlement and never change what the customer paid. An unknown provider amount fails
 // closed.
 //
 // The two mismatch kinds are kept apart on purpose: only a provider-side
@@ -41,13 +42,14 @@ func verifyProviderPayment(p *payment.Payment, status *domainProvider.Normalized
 	if status == nil || status.Status != payment.StatusPaid {
 		return payment.ErrNotSettledAtProvider
 	}
-	if status.Amount == nil || *status.Amount != p.Amount {
+	expected := p.TotalAmount()
+	if status.Amount == nil || *status.Amount != expected {
 		return fmt.Errorf("%w: expected %d, provider %s, webhook %s",
-			payment.ErrAmountMismatch, p.Amount, formatAmount(status.Amount), formatAmount(webhookAmount))
+			payment.ErrAmountMismatch, expected, formatAmount(status.Amount), formatAmount(webhookAmount))
 	}
-	if webhookAmount != nil && *webhookAmount != p.Amount {
+	if webhookAmount != nil && *webhookAmount != expected {
 		return fmt.Errorf("%w: expected %d, provider %s, webhook %s",
-			payment.ErrWebhookAmountMismatch, p.Amount, formatAmount(status.Amount), formatAmount(webhookAmount))
+			payment.ErrWebhookAmountMismatch, expected, formatAmount(status.Amount), formatAmount(webhookAmount))
 	}
 	return nil
 }

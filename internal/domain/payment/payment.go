@@ -34,6 +34,7 @@ type Payment struct {
 	Reference         string    `json:"reference" db:"reference"`
 	MerchantID        uuid.UUID `json:"merchant_id" db:"merchant_id"`
 	Amount            int64     `json:"amount" db:"amount"`
+	FeeAmount         int64     `json:"fee_amount" db:"fee_amount"`
 	Currency          string    `json:"currency" db:"currency"`
 	PaymentMethod     string    `json:"payment_method" db:"payment_method"`
 	ProviderName      string    `json:"provider_name" db:"provider_name"`
@@ -53,6 +54,10 @@ type Payment struct {
 	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
 }
+
+// TotalAmount is what the customer pays: the merchant's nominal plus any
+// provider fee added on top (zero unless the merchant has the customer bear it).
+func (p *Payment) TotalAmount() int64 { return p.Amount + p.FeeAmount }
 
 // ReconcileCursor is a keyset position in the reconcile candidate order
 // (created_at DESC, id DESC): the next batch starts strictly after it.
@@ -184,6 +189,8 @@ type PaymentResponse struct {
 	Reference         string     `json:"reference"`
 	MerchantID        uuid.UUID  `json:"merchant_id"`
 	Amount            int64      `json:"amount"`
+	FeeAmount         int64      `json:"fee_amount"`
+	TotalAmount       int64      `json:"total_amount"`
 	Currency          string     `json:"currency"`
 	PaymentMethod     string     `json:"payment_method"`
 	ProviderName      string     `json:"provider_name"`
@@ -212,6 +219,8 @@ func ToPaymentResponse(p *Payment, baseURL string) *PaymentResponse {
 		Reference:         p.Reference,
 		MerchantID:        p.MerchantID,
 		Amount:            p.Amount,
+		FeeAmount:         p.FeeAmount,
+		TotalAmount:       p.TotalAmount(),
 		Currency:          p.Currency,
 		PaymentMethod:     p.PaymentMethod,
 		ProviderName:      p.ProviderName,
@@ -232,24 +241,28 @@ func ToPaymentResponse(p *Payment, baseURL string) *PaymentResponse {
 }
 
 type PaymentStatusResponse struct {
-	ID        uuid.UUID  `json:"id"`
-	Reference string     `json:"reference"`
-	Status    string     `json:"status"`
-	Amount    int64      `json:"amount"`
-	Currency  string     `json:"currency"`
-	PaidAt    *time.Time `json:"paid_at,omitempty"`
-	ExpiresAt time.Time  `json:"expires_at"`
+	ID          uuid.UUID  `json:"id"`
+	Reference   string     `json:"reference"`
+	Status      string     `json:"status"`
+	Amount      int64      `json:"amount"`
+	FeeAmount   int64      `json:"fee_amount"`
+	TotalAmount int64      `json:"total_amount"`
+	Currency    string     `json:"currency"`
+	PaidAt      *time.Time `json:"paid_at,omitempty"`
+	ExpiresAt   time.Time  `json:"expires_at"`
 }
 
 func ToPaymentStatusResponse(p *Payment) *PaymentStatusResponse {
 	return &PaymentStatusResponse{
-		ID:        p.ID,
-		Reference: p.Reference,
-		Status:    p.Status,
-		Amount:    p.Amount,
-		Currency:  p.Currency,
-		PaidAt:    p.PaidAt,
-		ExpiresAt: p.ExpiresAt,
+		ID:          p.ID,
+		Reference:   p.Reference,
+		Status:      p.Status,
+		Amount:      p.Amount,
+		FeeAmount:   p.FeeAmount,
+		TotalAmount: p.TotalAmount(),
+		Currency:    p.Currency,
+		PaidAt:      p.PaidAt,
+		ExpiresAt:   p.ExpiresAt,
 	}
 }
 

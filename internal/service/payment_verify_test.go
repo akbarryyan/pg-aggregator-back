@@ -55,3 +55,43 @@ func TestVerifyProviderPayment(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifyProviderPayment_FeeBearing(t *testing.T) {
+	paid := func(amount *int64) *domainProvider.NormalizedPaymentStatus {
+		return &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid, Amount: amount}
+	}
+	cases := []struct {
+		name          string
+		p             *payment.Payment
+		status        *domainProvider.NormalizedPaymentStatus
+		webhookAmount *int64
+		wantErr       error
+		wantMsg       string
+	}{
+		{"total matches", &payment.Payment{Amount: 2000, FeeAmount: 15}, paid(ptrInt64(2015)), ptrInt64(2015), nil, ""},
+		{"total matches, no webhook amount", &payment.Payment{Amount: 2000, FeeAmount: 15}, paid(ptrInt64(2015)), nil, nil, ""},
+		{"larger nominal total matches", &payment.Payment{Amount: 100000, FeeAmount: 705}, paid(ptrInt64(100705)), ptrInt64(100705), nil, ""},
+		{"provider reports nominal only", &payment.Payment{Amount: 2000, FeeAmount: 15}, paid(ptrInt64(2000)), nil, payment.ErrAmountMismatch, "amount_mismatch: expected 2015, provider 2000, webhook none"},
+		{"webhook reports nominal only", &payment.Payment{Amount: 2000, FeeAmount: 15}, paid(ptrInt64(2015)), ptrInt64(2000), payment.ErrWebhookAmountMismatch, "webhook_amount_mismatch: expected 2015, provider 2015, webhook 2000"},
+		{"provider amount unknown", &payment.Payment{Amount: 2000, FeeAmount: 15}, paid(nil), nil, payment.ErrAmountMismatch, "amount_mismatch: expected 2015, provider none, webhook none"},
+		{"no fee behaves as before", &payment.Payment{Amount: 2000}, paid(ptrInt64(2000)), ptrInt64(2000), nil, ""},
+		{"no fee rejects a fee-inflated amount", &payment.Payment{Amount: 2000}, paid(ptrInt64(2015)), nil, payment.ErrAmountMismatch, "amount_mismatch: expected 2000, provider 2015, webhook none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyProviderPayment(tc.p, tc.status, tc.webhookAmount)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			if err.Error() != tc.wantMsg {
+				t.Errorf("message = %q, want %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}

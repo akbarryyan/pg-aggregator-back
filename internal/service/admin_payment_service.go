@@ -46,6 +46,8 @@ type AdminPaymentItem struct {
 	MerchantID        uuid.UUID `json:"merchant_id"`
 	MerchantName      string    `json:"merchant_name"`
 	Amount            int64     `json:"amount"`
+	FeeAmount         int64     `json:"fee_amount"`
+	TotalAmount       int64     `json:"total_amount"`
 	Currency          string    `json:"currency"`
 	PaymentMethod     string    `json:"payment_method"`
 	ProviderName      string    `json:"provider_name"`
@@ -144,6 +146,8 @@ func toAdminPaymentItem(p *payment.Payment, merchantName string) AdminPaymentIte
 		MerchantID:        p.MerchantID,
 		MerchantName:      merchantName,
 		Amount:            p.Amount,
+		FeeAmount:         p.FeeAmount,
+		TotalAmount:       p.TotalAmount(),
 		Currency:          p.Currency,
 		PaymentMethod:     p.PaymentMethod,
 		ProviderName:      p.ProviderName,

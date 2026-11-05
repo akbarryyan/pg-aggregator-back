@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
@@ -156,6 +158,10 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		if respondInvalidCallbackURL(w, err) {
 			return
 		}
+		if errors.Is(err, providerPkg.ErrFeeNotSupported) {
+			respondCreatePaymentError(w, err)
+			return
+		}
 		switch err {
 		case payment.ErrInvalidAmount,
 			payment.ErrUnsupportedCurrency,
@@ -228,6 +234,8 @@ func (h *AdminHandler) ExportPayments(w http.ResponseWriter, r *http.Request) {
 		"paid_at",
 		"created_at",
 		"updated_at",
+		"fee_amount",
+		"total_amount",
 	})
 
 	for _, item := range rows {
@@ -266,6 +274,8 @@ func (h *AdminHandler) ExportPayments(w http.ResponseWriter, r *http.Request) {
 			paidAt,
 			item.CreatedAt,
 			item.UpdatedAt,
+			strconv.FormatInt(item.FeeAmount, 10),
+			strconv.FormatInt(item.TotalAmount, 10),
 		})
 	}
 
@@ -469,6 +479,39 @@ func (h *AdminHandler) SetMerchantActive(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	respondJSON(w, http.StatusOK, m)
+}
+
+// SetMerchantFeeBearer lets an admin choose who pays the provider fee
+// (merchant or customer). Admin-only route; merchants have no equivalent.
+func (h *AdminHandler) SetMerchantFeeBearer(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(mux.Vars(r)["id"])
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid merchant ID")
+		return
+	}
+	var req struct {
+		FeeBearer string `json:"fee_bearer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	m, err := h.adminMerchantService.SetFeeBearer(r.Context(), id, req.FeeBearer)
+	switch {
+	case err == nil:
+		// This setting decides who pays real money and there is no audit
+		// table, so leave a trail in the log.
+		adminID, _ := middleware.AdminIDFromContext(r.Context())
+		logger.InfofCtx(r.Context(), "admin %s set merchant %s fee_bearer=%s", adminID, id, m.FeeBearer)
+		respondJSON(w, http.StatusOK, m)
+	case errors.Is(err, merchant.ErrInvalidFeeBearer):
+		respondError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, merchant.ErrMerchantNotFound):
+		respondError(w, http.StatusNotFound, "Merchant not found")
+	default:
+		logger.ErrorfCtx(r.Context(), "Failed to set merchant fee bearer: %v", err)
+		respondError(w, http.StatusInternalServerError, "Failed to update fee bearer")
+	}
 }
 
 func (h *AdminHandler) ListProviders(w http.ResponseWriter, r *http.Request) {

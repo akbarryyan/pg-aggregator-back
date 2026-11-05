@@ -39,7 +39,7 @@ func TestAdminNotificationService_ListNotifications(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", uuid.New(), int64(1000), "IDR", "qris",
 			"cashi", nil, "expired", "d", nil, nil, nil, nil,
-			"production", now, nil, now, now, "Acme",
+			"production", now, nil, now, now, int64(0), "Acme",
 		))
 
 	result, err := svc.ListNotifications(context.Background(), 30)
@@ -68,7 +68,7 @@ func TestAdminNotificationService_ListMerchantNotifications(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", merchantID, int64(1000), "IDR", "qris",
 			"cashi", nil, "failed", "d", nil, nil, nil, nil,
-			"production", now, nil, now, now, "Acme",
+			"production", now, nil, now, now, int64(0), "Acme",
 		))
 
 	result, err := svc.ListMerchantNotifications(context.Background(), merchantID, "production", 30)

@@ -319,6 +319,7 @@ func setupRouter(
 	adminAPI.HandleFunc("/merchants/{id}", adminHandler.GetMerchant).Methods("GET")
 	adminAPI.HandleFunc("/merchants/{id}", adminHandler.UpdateMerchant).Methods("PUT")
 	adminAPI.HandleFunc("/merchants/{id}/status", adminHandler.SetMerchantActive).Methods("PUT")
+	adminAPI.HandleFunc("/merchants/{id}/fee-bearer", adminHandler.SetMerchantFeeBearer).Methods("PUT")
 	adminAPI.HandleFunc("/merchants/{id}/payments", adminHandler.ListMerchantPayments).Methods("GET")
 	adminAPI.HandleFunc("/merchants/{id}/api-keys", adminHandler.ListMerchantAPIKeys).Methods("GET")
 	// API key create/rotate/revoke — sensitive account-mutation actions,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	"github.com/akbarryyan/pg-aggregator-back/internal/fee"
 	"github.com/google/uuid"
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -29,6 +30,15 @@ type orderState struct {
 	CreatedAt time.Time
 }
 
+// feeBasisPoints mirrors Cashi so merchants can test with identical numbers.
+const feeBasisPoints = 70
+
+// QuoteTotal tells the total a customer must pay so the merchant still nets
+// the nominal after the (simulated) provider fee.
+func (a *Adapter) QuoteTotal(nominal int64) (total, feeAmount int64, err error) {
+	return fee.QuoteTotalBasisPoints(nominal, feeBasisPoints)
+}
+
 func NewAdapter() *Adapter {
 	return &Adapter{
 		orders: make(map[string]*orderState),
@@ -45,9 +55,9 @@ func (a *Adapter) CreatePayment(ctx context.Context, req *provider.ProviderPayme
 		return nil, fmt.Errorf("sandbox: amount must be at least 2000")
 	}
 
-	// Mirror Cashi-like unique amount suffix (1–99) without network
-	unique := time.Now().UnixNano()%99 + 1
-	finalAmount := req.Amount + unique
+	// Real Cashi payments carry no unique amount suffix (a Rp 2.000 payment is
+	// charged exactly Rp 2.000), so the sandbox must not add one either.
+	finalAmount := req.Amount
 
 	ref := fmt.Sprintf("SBX-%s", strings.ReplaceAll(uuid.New().String(), "-", "")[:16])
 	expiresAt := req.ExpiresAt

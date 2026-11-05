@@ -274,6 +274,7 @@ paths:
     get:
       tags: [Admin - Payments]
       summary: Export payments as CSV
+      description: The last two columns are `fee_amount` and `total_amount` (`amount` + `fee_amount`); `amount` stays the merchant nominal.
       security: [{ adminBearer: [] }]
       parameters:
         - { name: status, in: query, schema: { type: string } }
@@ -379,6 +380,30 @@ paths:
         content: { application/json: { schema: { type: object, properties: { is_active: { type: boolean } } } } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/merchants/{id}/fee-bearer:
+    put:
+      tags: [Admin - Merchants]
+      summary: Set who bears the provider fee for a merchant
+      description: |
+        Admin only. `customer` adds the provider fee on top of the nominal for NEW payments;
+        existing payments keep their stored `fee_amount`. Not available to merchants.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fee_bearer]
+              properties:
+                fee_bearer: { type: string, enum: [merchant, customer] }
+      responses:
+        '200': { description: OK (the updated merchant), content: { application/json: { schema: { $ref: '#/components/schemas/MerchantResponse' } } } }
+        '400': { description: Invalid merchant id or fee_bearer not 'merchant' or 'customer', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /admin/merchants/{id}/payments:
@@ -743,6 +768,7 @@ paths:
     get:
       tags: [Merchant Dashboard]
       summary: Export this merchant's payments as CSV
+      description: The last two columns are `fee_amount` and `total_amount` (`amount` + `fee_amount`); `amount` stays the merchant nominal.
       security: [{ merchantBearer: [] }]
       responses:
         '200': { description: CSV file, content: { text/csv: { schema: { type: string, format: binary } } } }
@@ -928,10 +954,14 @@ paths:
     get:
       tags: [Public]
       summary: Get a payment by reference (checkout page polling)
-      description: No auth. Rate limited 120 req/min per IP. Returns only checkout-safe fields.
+      description: |
+        No auth. Rate limited 120 req/min per IP. Returns only checkout-safe fields.
+        Includes `amount` (merchant nominal), `fee_amount` (provider fee borne by
+        the customer, 0 when the merchant bears it) and `total_amount`
+        (`amount` + `fee_amount`, what the customer pays). The checkout page shows `total_amount`.
       parameters: [{ name: reference, in: path, required: true, schema: { type: string } }]
       responses:
-        '200': { description: OK }
+        '200': { description: OK (fields include id, reference, amount, fee_amount, total_amount, currency, status) }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
@@ -1233,7 +1263,7 @@ components:
       required: [amount, payment_method, description]
       properties:
         merchant_id: { type: string, format: uuid, description: Forced from context on merchant-authenticated routes }
-        amount: { type: integer, minimum: 1 }
+        amount: { type: integer, minimum: 1, description: 'Merchant nominal. If the merchant has fee_bearer customer, the customer pays amount + fee_amount (see total_amount in the response).' }
         currency: { type: string, default: IDR }
         payment_method: { type: string, enum: [qris] }
         description: { type: string }
@@ -1266,7 +1296,9 @@ components:
         id: { type: string, format: uuid }
         reference: { type: string }
         merchant_id: { type: string, format: uuid }
-        amount: { type: integer }
+        amount: { type: integer, description: Merchant nominal }
+        fee_amount: { type: integer, description: 'Provider fee added on top of `amount`; 0 unless the merchant has `fee_bearer: customer`.' }
+        total_amount: { type: integer, description: 'What the customer pays: `amount` + `fee_amount`. `amount` is always the merchant nominal.' }
         currency: { type: string }
         payment_method: { type: string }
         provider_name: { type: string }
@@ -1289,7 +1321,9 @@ components:
         id: { type: string, format: uuid }
         reference: { type: string }
         status: { type: string }
-        amount: { type: integer }
+        amount: { type: integer, description: Merchant nominal }
+        fee_amount: { type: integer, description: 'Provider fee added on top of `amount`; 0 unless the merchant has `fee_bearer: customer`.' }
+        total_amount: { type: integer, description: 'What the customer pays: `amount` + `fee_amount`. `amount` is always the merchant nominal.' }
         currency: { type: string }
         paid_at: { type: string, format: date-time, nullable: true }
         expires_at: { type: string, format: date-time }
@@ -1301,7 +1335,9 @@ components:
         reference: { type: string }
         merchant_id: { type: string, format: uuid }
         merchant_name: { type: string }
-        amount: { type: integer }
+        amount: { type: integer, description: Merchant nominal }
+        fee_amount: { type: integer, description: 'Provider fee added on top of `amount`; 0 unless the merchant has `fee_bearer: customer`.' }
+        total_amount: { type: integer, description: 'What the customer pays: `amount` + `fee_amount`. `amount` is always the merchant nominal.' }
         currency: { type: string }
         payment_method: { type: string }
         provider_name: { type: string }
@@ -1386,6 +1422,9 @@ components:
             Redirects (3xx) are not followed and count as a failed delivery, so
             register the final URL. Delivery is at-least-once: the same callback can
             arrive more than once, so de-duplicate on (`payment_id`, `event`).
+            The callback payload carries `amount` (merchant nominal), `fee_amount`
+            (0 unless the customer bears the provider fee) and `total_amount`
+            (`amount` + `fee_amount`, what the customer paid).
     MerchantResponse:
       type: object
       properties:
@@ -1396,6 +1435,14 @@ components:
         business_name: { type: string }
         webhook_url: { type: string, nullable: true }
         is_active: { type: boolean }
+        fee_bearer:
+          type: string
+          enum: [merchant, customer]
+          readOnly: true
+          description: |
+            Who pays the provider's percentage fee (default `merchant`). With `customer` the
+            fee is added on top of new payments (`total_amount` = `amount` + `fee_amount`).
+            Changed only by an admin via `PUT /admin/merchants/{id}/fee-bearer`; merchants cannot edit it.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     PaginatedMerchants:

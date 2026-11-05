@@ -461,3 +461,21 @@ func TestNewCashiAdapter_UsesRequestTimeout(t *testing.T) {
 		t.Errorf("httpClient.Timeout = %v, want %v", a.httpClient.Timeout, requestTimeout)
 	}
 }
+
+var _ providerPkg.FeeQuoter = (*CashiAdapter)(nil)
+
+func TestCashiAdapter_QuoteTotal(t *testing.T) {
+	a := NewCashiAdapter("https://cashi.id", "api-key", testSecret)
+	total, fee, err := a.QuoteTotal(2000)
+	if err != nil || total != 2015 || fee != 15 {
+		t.Fatalf("QuoteTotal(2000) = %d,%d,%v; want 2015,15,nil", total, fee, err)
+	}
+	// A larger nominal pins the exact rate: 71 bps would give 100716/716.
+	total, fee, err = a.QuoteTotal(100000)
+	if err != nil || total != 100705 || fee != 705 {
+		t.Fatalf("QuoteTotal(100000) = %d,%d,%v; want 100705,705,nil", total, fee, err)
+	}
+	if _, _, err := a.QuoteTotal(0); err == nil {
+		t.Error("a non-positive nominal must be rejected")
+	}
+}

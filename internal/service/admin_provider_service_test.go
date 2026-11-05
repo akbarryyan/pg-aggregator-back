@@ -159,7 +159,7 @@ func TestAdminProviderService_ListReconciliationCandidates(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", uuid.New(), int64(10000), "IDR", "qris",
 			"", nil, payment.StatusPending, "desc", nil, nil, nil, nil,
-			"production", now.Add(time.Hour), nil, now, now, "Acme",
+			"production", now.Add(time.Hour), nil, now, now, int64(15), "Acme",
 		))
 
 	result, err := svc.ListReconciliationCandidates(context.Background(), 50)
@@ -168,6 +168,9 @@ func TestAdminProviderService_ListReconciliationCandidates(t *testing.T) {
 	}
 	if len(result.Items) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(result.Items))
+	}
+	if it := result.Items[0]; it.Amount != 10000 || it.FeeAmount != 15 || it.TotalAmount != 10015 {
+		t.Errorf("amount/fee/total = %d/%d/%d, want 10000/15/10015", it.Amount, it.FeeAmount, it.TotalAmount)
 	}
 	if result.Items[0].CheckStatus != "missing_provider_ref" {
 		t.Errorf("expected missing_provider_ref (no provider_reference set), got %s", result.Items[0].CheckStatus)

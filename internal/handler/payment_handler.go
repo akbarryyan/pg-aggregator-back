@@ -123,6 +123,8 @@ func (h *PaymentHandler) GetPaymentByReference(w http.ResponseWriter, r *http.Re
 		"id":             p.ID,
 		"reference":      p.Reference,
 		"amount":         p.Amount,
+		"fee_amount":     p.FeeAmount,
+		"total_amount":   p.TotalAmount(),
 		"currency":       p.Currency,
 		"status":         p.Status,
 		"description":    p.Description,
@@ -209,6 +211,8 @@ func respondCreatePaymentError(w http.ResponseWriter, err error) {
 		respondError(w, http.StatusServiceUnavailable, "Payment provider is temporarily unavailable")
 	case errors.Is(err, providerPkg.ErrUnsupportedPaymentMethod):
 		respondError(w, http.StatusBadRequest, "Unsupported payment method")
+	case errors.Is(err, providerPkg.ErrFeeNotSupported):
+		respondError(w, http.StatusServiceUnavailable, "Fee calculation is not available for this payment provider")
 	case errors.Is(err, payment.ErrProviderError):
 		respondError(w, http.StatusBadGateway, "Payment provider error")
 	default:

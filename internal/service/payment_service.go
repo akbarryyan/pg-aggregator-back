@@ -87,33 +87,57 @@ func (s *PaymentService) WithSandboxProvider(p providerPkg.PaymentProvider) *Pay
 	return s
 }
 
-// ensureMerchantActive is the single choke point for every payment-creation
+// checkMerchantForCreate is the single choke point for every payment-creation
 // path (API key, dashboard, public payment-link checkout, admin): a merchant
 // deactivated after a token or link was issued must not create new payments.
-// An unknown merchant is left to the foreign key; no merchant repo (unit-test
-// wiring) skips the check.
-func (s *PaymentService) ensureMerchantActive(ctx context.Context, merchantID uuid.UUID) error {
+// It also reports who bears the provider fee. An unknown merchant is left to
+// the foreign key; with no merchant repo (unit-test wiring) the check is
+// skipped and the merchant bears the fee, as before. Any bearer value other
+// than an explicit "customer" means the merchant bears it.
+func (s *PaymentService) checkMerchantForCreate(ctx context.Context, merchantID uuid.UUID) (feeBearer string, err error) {
 	if s.merchantRepo == nil {
-		return nil
+		return merchant.FeeBearerMerchant, nil
 	}
 	m, err := s.merchantRepo.GetByID(ctx, merchantID)
 	if err != nil {
 		if errors.Is(err, merchant.ErrMerchantNotFound) {
-			return nil
+			return merchant.FeeBearerMerchant, nil
 		}
-		return fmt.Errorf("failed to load merchant: %w", err)
+		return "", fmt.Errorf("failed to load merchant: %w", err)
 	}
 	if !m.IsActive {
-		return merchant.ErrMerchantInactive
+		return "", merchant.ErrMerchantInactive
 	}
-	return nil
+	if m.FeeBearer == merchant.FeeBearerCustomer {
+		return merchant.FeeBearerCustomer, nil
+	}
+	return merchant.FeeBearerMerchant, nil
+}
+
+// chargeFor returns the amount to send to prov for a payment of nominal: the
+// bare nominal, or - when the customer bears the fee - the provider's quoted
+// total. A provider that cannot quote fails closed (ErrFeeNotSupported).
+func chargeFor(prov providerPkg.PaymentProvider, feeBearer string, nominal int64) (int64, error) {
+	if feeBearer != merchant.FeeBearerCustomer {
+		return nominal, nil
+	}
+	q, ok := prov.(providerPkg.FeeQuoter)
+	if !ok {
+		return 0, fmt.Errorf("provider %s: %w", prov.GetName(), providerPkg.ErrFeeNotSupported)
+	}
+	total, _, err := q.QuoteTotal(nominal)
+	if err != nil {
+		return 0, fmt.Errorf("provider %s fee quote: %w", prov.GetName(), err)
+	}
+	return total, nil
 }
 
 func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreatePaymentRequest) (*payment.Payment, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
-	if err := s.ensureMerchantActive(ctx, req.MerchantID); err != nil {
+	feeBearer, err := s.checkMerchantForCreate(ctx, req.MerchantID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -143,7 +167,9 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 	var (
 		providerResp *provider.ProviderPaymentResponse
 		lastErr      error
-		err          error
+		// requestedCharge is what the winning provider was asked to charge:
+		// the nominal, or the quoted total when the customer bears the fee.
+		requestedCharge = req.Amount
 	)
 
 	// Sandbox never calls real providers (Cashi, etc.)
@@ -152,9 +178,14 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 			return nil, fmt.Errorf("sandbox provider is not configured")
 		}
 		logger.InfofCtx(ctx, "Creating SANDBOX payment (mock provider, no Cashi call): %s", reference)
+		charge, chargeErr := chargeFor(s.sandboxProvider, feeBearer, req.Amount)
+		if chargeErr != nil {
+			return nil, chargeErr
+		}
+		requestedCharge = charge
 		providerReq := &provider.ProviderPaymentRequest{
 			InternalReference:     reference,
-			Amount:                req.Amount,
+			Amount:                charge,
 			Currency:              req.Currency,
 			Description:           req.Description,
 			CustomerName:          req.CustomerName,
@@ -175,9 +206,20 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 
 		for _, candidate := range candidateProviders {
 			selectedProvider := candidate.provider
+			// Quote per candidate: providers have different fee rates.
+			charge, chargeErr := chargeFor(selectedProvider, feeBearer, req.Amount)
+			if chargeErr != nil {
+				providerResp = nil
+				lastErr = chargeErr
+				logger.ErrorfCtx(ctx, "Provider %s cannot quote a customer-borne fee: %v", selectedProvider.GetName(), chargeErr)
+				if !candidate.failoverEnabled {
+					break
+				}
+				continue
+			}
 			providerReq := &provider.ProviderPaymentRequest{
 				InternalReference:     reference,
-				Amount:                req.Amount,
+				Amount:                charge,
 				Currency:              req.Currency,
 				Description:           req.Description,
 				CustomerName:          req.CustomerName,
@@ -210,6 +252,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 						providerResp.RawResponse["is_qris_custom"], providerResp.RawResponse["expected_net"],
 					)
 				}
+				requestedCharge = charge
 				break
 			}
 
@@ -237,8 +280,20 @@ func (s *PaymentService) CreatePayment(ctx context.Context, req *payment.CreateP
 	p.ProviderReference = &providerResp.ProviderReference
 	p.QRISData = providerResp.QRISData
 	p.Status = providerResp.Status
-	if providerResp.Amount > 0 {
-		p.Amount = providerResp.Amount
+	charged := providerResp.Amount
+	if charged <= 0 {
+		charged = requestedCharge
+	}
+	if feeBearer == merchant.FeeBearerCustomer {
+		// The merchant's nominal never changes; the fee is whatever the
+		// provider actually charged on top of it.
+		if charged < req.Amount {
+			return nil, fmt.Errorf("provider %s charged %d, below the nominal %d: %w",
+				providerResp.ProviderName, charged, req.Amount, payment.ErrProviderError)
+		}
+		p.FeeAmount = charged - req.Amount
+	} else if providerResp.Amount > 0 {
+		p.Amount = providerResp.Amount // unchanged legacy behaviour
 	}
 	if !providerResp.ExpiresAt.IsZero() {
 		p.ExpiresAt = providerResp.ExpiresAt
@@ -466,7 +521,7 @@ func (s *PaymentService) recordReconcileMismatch(ctx context.Context, p *payment
 			"source":          "reconcile",
 			"provider_status": status.Status,
 			"provider_amount": providerAmount,
-			"expected_amount": p.Amount,
+			"expected_amount": p.TotalAmount(),
 		},
 		IsProcessed:     false,
 		ProcessingError: &msg,

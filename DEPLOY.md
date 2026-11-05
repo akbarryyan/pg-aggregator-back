@@ -260,6 +260,7 @@ Kode: kembalikan tag sebelumnya di `x-api-image:`, lalu `docker compose up -d`.
 Bila rollback ke versi sebelum Paket 4, kembalikan juga `docker-compose.yaml`
 lama (lihat 4.4 langkah 2); constraint database Paket 4 tetap terpasang dan
 image lama kompatibel dengannya.
+Untuk Paket 5 lihat 4.5 langkah 5.
 Migration hanya maju: bila migration rilis baru tidak kompatibel dengan kode
 lama, pulihkan backup dari langkah 4 (lihat bagian 5).
 
@@ -514,6 +515,112 @@ ambil backup dulu (langkah backup di bagian 4) sebelum `make migrate`.
    `idle_in_transaction_session_timeout` 60 detik; panggilan ke Cashi
    di-timeout 10 detik. Level log mengikuti `app.environment`
    (`development` → debug, selain itu info; di VPS `production` → info).
+
+### 4.5 Cek sebelum deploy Paket 5
+
+Paket 5 menambah opsi fee provider ditanggung customer (migration 020). Tidak
+ada key `.config.toml` baru, dan tidak ada merchant yang berubah perilaku
+sampai admin mengaktifkannya. Ambil backup dulu (langkah 4 pada daftar rilis
+di awal bagian 4, perintah `pg_dump` di bagian 5) sebelum `make migrate`.
+
+1. **`make migrate`** menerapkan 020 sebelum image API baru dijalankan:
+   kolom `merchants.fee_bearer` (default `merchant`) dan `payments.fee_amount`
+   (default 0), beserta dua constraint. Aditif dan idempoten; tidak ada
+   perubahan perilaku: semua merchant tetap `merchant` dan payment lama punya
+   `fee_amount` 0, sehingga totalnya sama dengan nominalnya.
+2. **Deploy backend dan front-end bersamaan.** Dashboard dan halaman checkout
+   kini membaca `fee_amount` dan `total_amount`, dan panel admin punya
+   pengaturan baru. Field itu aditif, jadi front-end lama dengan backend baru
+   tetap berjalan, tetapi hanya menampilkan nominal (`amount`). **Bila
+   pengaturan diaktifkan sebelum front-end baru tayang, checkout dan dashboard
+   menampilkan nominal sementara QR menagih `total_amount`** (mis. Rp 2.015
+   pada payment Rp 2.000). Jangan aktifkan sebelum keduanya terpasang.
+3. **Cara mengaktifkan.** Panel admin -> Merchants -> detail merchant -> kartu
+   **Fee borne by** -> pilih **Customer** -> simpan (ada dialog konfirmasi).
+   Atau `PUT /api/v1/admin/merchants/{id}/fee-bearer` dengan
+   `{"fee_bearer":"customer"}`. Hanya admin yang bisa; berlaku untuk payment
+   **baru** saja. Sejak diaktifkan, customer merchant itu langsung ditagih
+   fee, jadi **jangan aktifkan merchant yang melayani customer sungguhan
+   sebelum verifikasi di langkah 4 lulus.**
+4. **Verifikasi wajib dengan satu pembayaran uji nyata, lebih dulu pada
+   merchant internal/uji milik operator**, tidak pernah pada merchant yang
+   dipakai customer. Jalankan payment uji dengan opsi yang **sama** dengan
+   yang akan dipakai merchant yang hendak diaktifkan (terutama
+   `use_custom_merchant_name` / QRIS Custom: mode custom Cashi mengembalikan
+   `expected_net` dan perilaku fee-nya bisa berbeda):
+   1. Aktifkan **Customer** pada merchant uji itu saja. Buat payment
+      `production` nominal Rp 2.000. Respons harus memuat `amount: 2000`,
+      `fee_amount: 15`, `total_amount: 2015`.
+   2. Bayar QR-nya (nominal di QR/aplikasi bayar harus Rp 2.015).
+   3. Bandingkan dengan dashboard Cashi: net yang diterima harus Rp 2.000 (atau
+      Rp 2.001 bila Cashi membulatkan fee-nya ke bawah).
+   4. Pastikan nominal yang dilaporkan Cashi pada check-status/webhook adalah
+      2015 dan payment berubah `paid`. Ini sekaligus menuntaskan pengecekan
+      nominal Cashi yang tertunda dari Paket 1.
+   5. **Hanya bila net dan nominal Cashi cocok**, aktifkan merchant
+      customer-facing satu per satu. Bila net Cashi **kurang** dari nominal
+      (atau payment tidak menjadi `paid` karena nominal tidak cocok),
+      kembalikan merchant uji ke `merchant` dan laporkan; jangan aktifkan
+      merchant lain. Mengembalikan ke `merchant` hanya mencegah payment
+      **berikutnya** terdampak; payment yang sudah dibuat dengan fee tidak
+      ikut berubah.
+
+   Batas atas: berdasarkan informasi yang kami terima, Cashi membatasi total
+   kotor sekitar Rp 10.000.000 (belum diverifikasi; konfirmasikan ke Cashi).
+   Total yang melebihi batas Cashi dapat ditolak provider sehingga pembuatan
+   payment gagal; uji nominal besar plus fee dulu. Backend tidak menerapkan
+   batas ini sendiri.
+5. **Rollback, urutannya wajib.** Image lama tidak mengenal `fee_amount` dan
+   memverifikasi terhadap **nominal**. Payment fee-customer yang settle
+   setelah rollback ditolak sebagai nominal tidak cocok dan harus ditangani
+   manual (uang customer sudah masuk). Urutan berikut **mengurangi** risikonya:
+   1. Kembalikan **setiap** merchant yang `customer` ke `merchant` lebih dulu.
+   2. **Tunggu** sampai daftar Payments admin dengan filter status `pending`
+      tidak lagi memuat baris yang ber-fee (`fee_amount` > 0), **dan**
+      sedikitnya **6 jam** (jendela reconcile payment `expired`,
+      `reconcileExpiredWindow`) sudah lewat sejak `expires_at` terakhir di
+      antara payment fee-customer, ditambah 5 menit masa tenggang
+      (`expireGracePeriod`). Selama 6 jam itu payment `expired` masih dicek
+      ulang tiap 2 menit dan Cashi masih bisa mengirim webhook; image lama
+      yang menerimanya memverifikasi terhadap nominal dan mencatat
+      `amount_mismatch`. Export CSV memuat kolom `expires_at` (halaman
+      daftar tidak menampilkannya) dan `fee_amount` serta `total_amount`
+      sebagai dua kolom terakhir. Jangan berpegang pada TTL 30 menit: itu
+      hanya default; `expires_in_minutes` bisa sampai 1440 dan untuk payment
+      produksi `expires_at` yang berlaku adalah milik Cashi (menimpa nilai
+      lokal). Payment sandbox milik merchant `customer` juga tampak ber-fee
+      di daftar `pending` (tidak berbahaya, hanya berlebih).
+   3. Baru setelah itu rollback image (dan compose bila perlu, lihat 4.1).
+
+   Payment `expired` masih bisa settle terlambat (jalur late payment), jadi
+   menunggu `paid` atau `expired` saja tidak menutup jendelanya sepenuhnya.
+   Payment fee-customer yang settle terlambat setelah rollback tetap ditolak
+   image lama sebagai nominal tidak cocok dan harus ditangani manual.
+
+   Payment dengan event `amount_mismatch` **keluar permanen dari reconcile
+   otomatis**, juga setelah roll forward lagi. Setelah roll forward, setiap
+   payment fee-customer (`fee_amount` > 0) yang terkena harus direkonsiliasi
+   manual dengan memanggil `POST /api/v1/admin/reconciliation/{payment_id}/check`
+   memakai token admin, satu kali untuk tiap payment id (endpoint ini
+   memverifikasi terhadap total dan bisa menyelesaikan payment `expired`
+   menjadi `paid` sebagai pembayaran terlambat). Halaman Reconciliation di
+   panel hanya memuat payment `pending`, jadi payment `expired` yang terkena
+   **tidak akan tampil di sana**; jangan menganggap pekerjaan selesai hanya
+   karena halaman itu kosong. Cara menemukan payment yang terkena: (a) filter
+   daftar Payments admin (atau export CSV) untuk `fee_amount` > 0 berstatus
+   `expired` (atau masih `pending`) dengan `expires_at` dalam 6 jam sebelum
+   rollback; dan/atau (b) buka halaman detail payment dan cari event webhook
+   dengan `processing_error` berawalan `amount_mismatch`. Payment yang settle
+   terlambat tanpa webhook sama sekali tidak meninggalkan event, sehingga
+   hanya bisa ditemukan lewat filter (a). Reconcile otomatis berjalan tiap 2
+   menit dalam batch dan bergiliran ke semua kandidat, jadi tiap payment
+   dicek ulang secara berkala, belum tentu tiap 2 menit.
+
+   Mengganti merchant ke `merchant` tanpa rollback image aman: payment lama
+   menyimpan `fee_amount`-nya sendiri sehingga verifikasi tetap benar.
+6. **Sandbox.** Nominal sandbox tidak lagi diberi akhiran acak 1-99; sandbox
+   memakai aturan fee yang sama dengan Cashi (0,7%), sehingga angkanya sama
+   dengan produksi.
 
 ## 5. Operasional
 

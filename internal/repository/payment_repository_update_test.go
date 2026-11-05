@@ -15,7 +15,7 @@ var adminPaymentCols = []string{
 	"provider_name", "provider_reference", "status", "description",
 	"customer_name", "customer_email", "qris_data", "callback_url",
 	"environment", "expires_at", "paid_at", "created_at", "updated_at",
-	"merchant_name",
+	"fee_amount", "merchant_name",
 }
 
 // TestPaymentRepository_ListAdmin_NoFilters verifies the base query (no
@@ -105,6 +105,7 @@ func TestPaymentRepository_ListAdmin_ScansMerchantName(t *testing.T) {
 		p.ProviderName, p.ProviderReference, p.Status, p.Description,
 		p.CustomerName, p.CustomerEmail, p.QRISData, p.CallbackURL,
 		p.Environment, p.ExpiresAt, p.PaidAt, p.CreatedAt, p.UpdatedAt,
+		p.FeeAmount,
 		"Acme Business",
 	)
 	mock.ExpectQuery(`SELECT[\s\S]*FROM payments p`).WillReturnRows(rows)

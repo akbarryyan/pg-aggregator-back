@@ -201,7 +201,7 @@ func (h *PaymentLinkHandler) ListPaymentLinkPayments(w http.ResponseWriter, r *h
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"items":  items,
+		"items":  withTotalAmount(items),
 		"total":  total,
 		"limit":  limit,
 		"offset": offset,
@@ -295,4 +295,20 @@ func respondPaymentLinkValidationError(w http.ResponseWriter, r *http.Request, e
 		logger.ErrorfCtx(r.Context(), "Payment link operation failed: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to save payment link")
 	}
+}
+
+// paymentWithTotal serialises a payment exactly as before (fee_amount is
+// already a field of Payment) and adds total_amount, which is a method on
+// Payment and so would otherwise be missing from the raw struct's JSON.
+type paymentWithTotal struct {
+	*payment.Payment
+	TotalAmount int64 `json:"total_amount"`
+}
+
+func withTotalAmount(items []*payment.Payment) []paymentWithTotal {
+	out := make([]paymentWithTotal, 0, len(items))
+	for _, p := range items {
+		out = append(out, paymentWithTotal{Payment: p, TotalAmount: p.TotalAmount()})
+	}
+	return out
 }

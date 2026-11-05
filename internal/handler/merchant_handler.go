@@ -215,6 +215,7 @@ func (h *MerchantHandler) ExportPayments(w http.ResponseWriter, r *http.Request)
 		"id", "reference", "amount", "currency", "payment_method",
 		"provider_name", "provider_reference", "status", "description",
 		"customer_name", "customer_email", "environment", "expires_at", "paid_at", "created_at",
+		"fee_amount", "total_amount",
 	})
 	for _, item := range rows {
 		providerRef := ""
@@ -249,6 +250,8 @@ func (h *MerchantHandler) ExportPayments(w http.ResponseWriter, r *http.Request)
 			item.ExpiresAt,
 			paidAt,
 			item.CreatedAt,
+			strconv.FormatInt(item.FeeAmount, 10),
+			strconv.FormatInt(item.TotalAmount, 10),
 		})
 	}
 	writer.Flush()

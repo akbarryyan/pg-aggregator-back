@@ -19,6 +19,7 @@ var paymentCols = []string{
 	"provider_name", "provider_reference", "status", "description",
 	"customer_name", "customer_email", "qris_data", "callback_url",
 	"environment", "payment_link_id", "expires_at", "paid_at", "created_at", "updated_at",
+	"fee_amount",
 }
 
 func paymentRow(p *payment.Payment) []driver.Value {
@@ -27,6 +28,7 @@ func paymentRow(p *payment.Payment) []driver.Value {
 		p.ProviderName, p.ProviderReference, p.Status, p.Description,
 		p.CustomerName, p.CustomerEmail, p.QRISData, p.CallbackURL,
 		p.Environment, p.PaymentLinkID, p.ExpiresAt, p.PaidAt, p.CreatedAt, p.UpdatedAt,
+		p.FeeAmount,
 	}
 }
 
@@ -37,6 +39,7 @@ func samplePayment() *payment.Payment {
 		Reference:     "PAY-1",
 		MerchantID:    uuid.New(),
 		Amount:        50000,
+		FeeAmount:     350,
 		Currency:      payment.CurrencyIDR,
 		PaymentMethod: payment.PaymentMethodQRIS,
 		Status:        payment.StatusPending,
@@ -59,6 +62,7 @@ func TestPaymentRepository_Create(t *testing.T) {
 			p.ProviderName, p.ProviderReference, p.Status, p.Description,
 			p.CustomerName, p.CustomerEmail, p.QRISData, p.CallbackURL,
 			p.Environment, p.PaymentLinkID, p.ExpiresAt, p.CreatedAt, p.UpdatedAt,
+			p.FeeAmount,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(p.ID, p.CreatedAt, p.UpdatedAt))
@@ -83,6 +87,7 @@ func TestPaymentRepository_Create_DefaultsEnvironmentToProduction(t *testing.T) 
 			p.ProviderName, p.ProviderReference, p.Status, p.Description,
 			p.CustomerName, p.CustomerEmail, p.QRISData, p.CallbackURL,
 			payment.EnvironmentProduction, p.PaymentLinkID, p.ExpiresAt, p.CreatedAt, p.UpdatedAt,
+			p.FeeAmount,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(p.ID, p.CreatedAt, p.UpdatedAt))

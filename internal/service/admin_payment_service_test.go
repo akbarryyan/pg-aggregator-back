@@ -2,10 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
 )
@@ -36,7 +38,7 @@ var adminPaymentCols = []string{
 	"provider_name", "provider_reference", "status", "description",
 	"customer_name", "customer_email", "qris_data", "callback_url",
 	"environment", "expires_at", "paid_at", "created_at", "updated_at",
-	"merchant_name",
+	"fee_amount", "merchant_name",
 }
 
 func TestAdminPaymentService_ListPayments(t *testing.T) {
@@ -47,7 +49,7 @@ func TestAdminPaymentService_ListPayments(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", uuid.New(), int64(10000), "IDR", "qris",
 			"cashi", nil, "pending", "desc", nil, nil, nil, nil,
-			"production", now, nil, now, now, "Acme",
+			"production", now, nil, now, now, int64(0), "Acme",
 		))
 	mock.ExpectQuery(`SELECT COUNT\(\*\)`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
@@ -71,7 +73,7 @@ func TestAdminPaymentService_ExportPayments(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", uuid.New(), int64(10000), "IDR", "qris",
 			"cashi", nil, "paid", "desc", nil, nil, nil, nil,
-			"production", now, &now, now, now, "Acme",
+			"production", now, &now, now, now, int64(0), "Acme",
 		))
 
 	items, err := svc.ExportPayments(context.Background(), "", "", nil, nil, nil, "")
@@ -96,16 +98,17 @@ func TestAdminPaymentService_GetPayment(t *testing.T) {
 			"provider_name", "provider_reference", "status", "description",
 			"customer_name", "customer_email", "qris_data", "callback_url",
 			"environment", "payment_link_id", "expires_at", "paid_at", "created_at", "updated_at",
+			"fee_amount",
 		}).AddRow(
 			paymentID, "PAY-1", merchantID, int64(10000), "IDR", "qris",
 			"cashi", nil, "pending", "desc", nil, nil, nil, nil,
-			"production", nil, now, nil, now, now,
+			"production", nil, now, nil, now, now, int64(0),
 		))
 	mock.ExpectQuery(`SELECT .* FROM merchants\s+WHERE id = \$1`).
 		WithArgs(merchantID).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "name", "email", "phone", "business_name", "webhook_url", "webhook_secret", "is_active", "created_at", "updated_at",
-		}).AddRow(merchantID, "Acme Inc", "a@example.com", "", "Acme Business", nil, nil, true, now, now))
+			"id", "name", "email", "phone", "business_name", "webhook_url", "webhook_secret", "is_active", "fee_bearer", "created_at", "updated_at",
+		}).AddRow(merchantID, "Acme Inc", "a@example.com", "", "Acme Business", nil, nil, true, "merchant", now, now))
 
 	detail, err := svc.GetPayment(context.Background(), paymentID)
 	if err != nil {
@@ -113,5 +116,30 @@ func TestAdminPaymentService_GetPayment(t *testing.T) {
 	}
 	if detail.MerchantName != "Acme Business" {
 		t.Errorf("expected merchant name from business_name, got %q", detail.MerchantName)
+	}
+}
+
+func TestToAdminPaymentItem_FeeAndTotalInJSON(t *testing.T) {
+	now := time.Now()
+	p := &payment.Payment{ID: uuid.New(), Amount: 2000, FeeAmount: 15, ExpiresAt: now, CreatedAt: now, UpdatedAt: now}
+	raw, err := json.Marshal(toAdminPaymentItem(p, "Acme"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	_ = json.Unmarshal(raw, &m)
+	if m["amount"] != float64(2000) || m["fee_amount"] != float64(15) || m["total_amount"] != float64(2015) {
+		t.Errorf("amount/fee_amount/total_amount = %v/%v/%v, want 2000/15/2015", m["amount"], m["fee_amount"], m["total_amount"])
+	}
+
+	p.FeeAmount = 0
+	raw, _ = json.Marshal(toAdminPaymentItem(p, "Acme"))
+	m = map[string]interface{}{}
+	_ = json.Unmarshal(raw, &m)
+	if f, ok := m["fee_amount"]; !ok || f != float64(0) {
+		t.Errorf("fee_amount must be present and 0, got %v (present=%v)", f, ok)
+	}
+	if m["total_amount"] != float64(2000) {
+		t.Errorf("total_amount = %v, want 2000", m["total_amount"])
 	}
 }

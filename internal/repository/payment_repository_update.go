@@ -306,6 +306,7 @@ func (r *PaymentRepository) ListAdmin(
 			p.provider_name, p.provider_reference, p.status, p.description,
 			p.customer_name, p.customer_email, p.qris_data, p.callback_url,
 			p.environment, p.expires_at, p.paid_at, p.created_at, p.updated_at,
+			p.fee_amount,
 			COALESCE(m.business_name, m.name, '') AS merchant_name
 		FROM payments p
 		LEFT JOIN merchants m ON m.id = p.merchant_id
@@ -369,6 +370,7 @@ func (r *PaymentRepository) ListAdmin(
 			&p.ProviderName, &p.ProviderReference, &p.Status, &p.Description,
 			&p.CustomerName, &p.CustomerEmail, &p.QRISData, &p.CallbackURL,
 			&p.Environment, &p.ExpiresAt, &p.PaidAt, &p.CreatedAt, &p.UpdatedAt,
+			&p.FeeAmount,
 			&merchantName,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan admin payment: %w", err)

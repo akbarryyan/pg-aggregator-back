@@ -15,6 +15,7 @@ import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/paymentlink"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	"github.com/akbarryyan/pg-aggregator-back/internal/fee"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
@@ -488,8 +489,10 @@ type fakeProvider struct {
 	name string
 
 	createCalls int
-	createResp  *domainProvider.ProviderPaymentResponse
-	createErr   error
+	// lastCreateReq is the most recent request CreatePayment received.
+	lastCreateReq *domainProvider.ProviderPaymentRequest
+	createResp    *domainProvider.ProviderPaymentResponse
+	createErr     error
 	// createRaw, when set, returns its (resp, err) verbatim so tests can
 	// model misbehaving providers (resp+err together, or nil+nil).
 	createRaw func() (*domainProvider.ProviderPaymentResponse, error)
@@ -519,6 +522,8 @@ func (f *fakeProvider) CreatePayment(ctx context.Context, req *domainProvider.Pr
 		return nil, err
 	}
 	f.createCalls++
+	reqCopy := *req
+	f.lastCreateReq = &reqCopy
 	if f.createRaw != nil {
 		return f.createRaw()
 	}
@@ -855,4 +860,14 @@ func (f *fakeIdempotencyRepo) seed(merchantID uuid.UUID, env, key, hash string, 
 	defer f.mu.Unlock()
 	f.rows[idemKey(merchantID, env, key)] = &idempotency.Record{ID: uuid.New(), MerchantID: merchantID,
 		Environment: env, Key: key, RequestHash: hash, CreatedAt: createdAt}
+}
+
+// fakeQuoterProvider is a fakeProvider that can quote a customer-borne fee.
+type fakeQuoterProvider struct {
+	*fakeProvider
+	bps int64
+}
+
+func (f *fakeQuoterProvider) QuoteTotal(n int64) (int64, int64, error) {
+	return fee.QuoteTotalBasisPoints(n, f.bps)
 }

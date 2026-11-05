@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
@@ -74,6 +76,12 @@ func TestPaymentHandler_CreatePayment_SandboxSuccess(t *testing.T) {
 	}
 	if resp["reference"] == "" || resp["reference"] == nil {
 		t.Errorf("expected non-empty reference")
+	}
+	if fee, ok := resp["fee_amount"]; !ok || fee != float64(0) {
+		t.Errorf("fee_amount must be present and 0 for a merchant-bearing payment, got %v (present=%v)", fee, ok)
+	}
+	if total, ok := resp["total_amount"]; !ok || total != float64(50000) {
+		t.Errorf("total_amount must be present and equal amount 50000, got %v (present=%v)", total, ok)
 	}
 }
 
@@ -398,5 +406,53 @@ func TestPaymentHandler_CreatePayment_EmptyOrRepeatedIdempotencyKeyIs400(t *test
 	}
 	if rec := postCreateRawKeys(h, m); rec.Code != http.StatusCreated {
 		t.Errorf("absent header: want 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRespondCreatePaymentError_FeeNotSupported(t *testing.T) {
+	rec := httptest.NewRecorder()
+	respondCreatePaymentError(rec, fmt.Errorf("provider cashi: %w", providerPkg.ErrFeeNotSupported))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Fee calculation is not available for this payment provider") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestPaymentHandler_GetPaymentByReference_CarriesFeeAndTotal(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		fee, total float64
+	}{{"customer bears fee", 15, 2015}, {"merchant bears fee", 0, 2000}} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, repo := newTestPaymentService()
+			h := NewPaymentHandler(svc, "http://localhost:3000")
+			_ = repo.Create(context.Background(), &payment.Payment{
+				Reference: "PAY-LOOKUP", MerchantID: uuid.New(), Amount: 2000, FeeAmount: int64(tc.fee),
+				Currency: payment.CurrencyIDR, Status: payment.StatusPending,
+				ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/public/payments/by-reference/PAY-LOOKUP", nil)
+			req = mux.SetURLVars(req, map[string]string{"reference": "PAY-LOOKUP"})
+			rec := httptest.NewRecorder()
+			h.GetPaymentByReference(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+			var resp map[string]interface{}
+			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+			if resp["amount"] != float64(2000) {
+				t.Errorf("amount must stay nominal 2000, got %v", resp["amount"])
+			}
+			if fee, ok := resp["fee_amount"]; !ok || fee != tc.fee {
+				t.Errorf("fee_amount = %v (present=%v), want %v", fee, ok, tc.fee)
+			}
+			if total, ok := resp["total_amount"]; !ok || total != tc.total {
+				t.Errorf("total_amount = %v (present=%v), want %v", total, ok, tc.total)
+			}
+		})
 	}
 }

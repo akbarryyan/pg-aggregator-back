@@ -173,3 +173,28 @@ func TestPaymentLinkHandler_Checkout_InactiveMerchantIs403(t *testing.T) {
 
 	assertInactiveForbidden(t, rec, repo)
 }
+
+// plainProvider hides the wrapped provider's optional interfaces (notably
+// FeeQuoter), modelling a provider that cannot quote a fee.
+type plainProvider struct{ providerPkg.PaymentProvider }
+
+func TestAdminHandler_CreatePayment_CustomerFeeWithoutQuoterIs503(t *testing.T) {
+	m := &merchant.Merchant{ID: uuid.New(), IsActive: true, FeeBearer: merchant.FeeBearerCustomer}
+	repo := newFakePaymentRepo()
+	svc := service.NewPaymentService(repo, &fakeMerchantProviderConfigRepo{}, newFakeWebhookEventRepo(),
+		providerPkg.NewProviderRouter(), "http://localhost:8080").
+		WithSandboxProvider(plainProvider{sandbox.NewAdapter()}).
+		WithMerchantCallbackDeps(inactiveMerchantRepo{m}, nil)
+	h := NewAdminHandler(svc, "http://localhost:3000")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/payments", paymentBody(t, m.ID))
+	rec := httptest.NewRecorder()
+	h.CreatePayment(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(repo.byID) != 0 {
+		t.Errorf("no payment may be stored")
+	}
+}

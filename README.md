@@ -146,7 +146,7 @@ Nilai default di bawah diatur di `[rate_limit.auth|public|sensitive|api]` pada `
 
 ## Routes (ringkas)
 
-> Kontrak API lengkap (semua 63 route, request/response schema, auth per
+> Kontrak API lengkap (semua 78 route, request/response schema, auth per
 > endpoint) ada di [docs/openapi.yaml](docs/openapi.yaml) — OpenAPI 3.0,
 > bisa dibuka di [Swagger Editor](https://editor.swagger.io) atau tool
 > serupa. Dibuat dari route table `main.go` + domain struct sesungguhnya,
@@ -216,6 +216,25 @@ dilindungi constraint database (migration 019): `amount > 0`, status hanya
 `pending/paid/expired/failed/cancelled`, `(provider_name, provider_reference)`
 unik, dan merchant yang masih punya payment tidak bisa dihapus. Detail
 deploy ada di [DEPLOY.md](DEPLOY.md) bagian 4.4.
+
+## Biaya provider (customer-borne)
+
+Siapa yang menanggung fee persentase provider (Cashi 0,7%) adalah pengaturan
+**per merchant**: `merchants.fee_bearer`, default `merchant` (perilaku lama:
+customer membayar nominal, fee dipotong dari penerimaan merchant). Bila
+`customer`, fee ditambahkan di atas nominal pada payment **baru**.
+
+- Total `G` adalah bilangan bulat terkecil dengan `G - ceil(G * 0,007) >= nominal`,
+  dihitung dengan aritmetika integer di `internal/fee`. Contoh: nominal
+  Rp 2.000 -> customer membayar Rp 2.015, fee Rp 15.
+- Field di respons payment, status, lookup publik, payload callback merchant,
+  dan dua kolom terakhir export CSV: `amount` = nominal merchant (tidak
+  berubah), `fee_amount` = fee yang ditambahkan (0 bila merchant yang
+  menanggung), `total_amount` = `amount + fee_amount` (yang dibayar customer).
+- Sandbox memakai aturan dan angka yang sama (tidak ada lagi akhiran acak 1-99).
+- Hanya admin yang bisa mengubahnya: `PUT /admin/merchants/{id}/fee-bearer`
+  (`{"fee_bearer": "merchant" | "customer"}`). Merchant tidak bisa mengubahnya
+  sendiri, dan perubahan hanya memengaruhi payment baru.
 
 ## Logging
 

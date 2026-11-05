@@ -74,6 +74,8 @@ type ReconciliationItem struct {
 	ProviderReference *string   `json:"provider_reference,omitempty"`
 	Status            string    `json:"status"`
 	Amount            int64     `json:"amount"`
+	FeeAmount         int64     `json:"fee_amount"`
+	TotalAmount       int64     `json:"total_amount"`
 	Currency          string    `json:"currency"`
 	CreatedAt         string    `json:"created_at"`
 	ExpiresAt         string    `json:"expires_at"`
@@ -237,6 +239,8 @@ func (s *AdminProviderService) ListReconciliationCandidates(ctx context.Context,
 			ProviderReference: p.ProviderReference,
 			Status:            p.Status,
 			Amount:            p.Amount,
+			FeeAmount:         p.FeeAmount,
+			TotalAmount:       p.TotalAmount(),
 			Currency:          p.Currency,
 			CreatedAt:         p.CreatedAt.UTC().Format(time.RFC3339),
 			ExpiresAt:         p.ExpiresAt.UTC().Format(time.RFC3339),

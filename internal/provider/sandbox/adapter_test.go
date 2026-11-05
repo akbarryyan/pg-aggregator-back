@@ -8,7 +8,46 @@ import (
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 )
+
+var _ providerPkg.FeeQuoter = (*Adapter)(nil)
+
+func TestSandboxQuoteTotal(t *testing.T) {
+	a := NewAdapter()
+	total, fee, err := a.QuoteTotal(2000)
+	if err != nil || total != 2015 || fee != 15 {
+		t.Fatalf("QuoteTotal(2000) = %d,%d,%v; want 2015,15,nil", total, fee, err)
+	}
+	// A larger nominal pins the exact rate: 71 bps would give 100716/716.
+	total, fee, err = a.QuoteTotal(100000)
+	if err != nil || total != 100705 || fee != 705 {
+		t.Fatalf("QuoteTotal(100000) = %d,%d,%v; want 100705,705,nil", total, fee, err)
+	}
+	if _, _, err := a.QuoteTotal(0); err == nil {
+		t.Error("a non-positive nominal must be rejected")
+	}
+}
+
+func TestCreatePayment_AmountIsExactNoRandomSuffix(t *testing.T) {
+	a := NewAdapter()
+	for i := 0; i < 50; i++ {
+		resp, err := a.CreatePayment(context.Background(), &provider.ProviderPaymentRequest{
+			InternalReference: "ORD-EXACT",
+			Amount:            2015,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.Amount != 2015 {
+			t.Fatalf("iteration %d: amount = %d, want exactly 2015", i, resp.Amount)
+		}
+		st, err := a.GetPaymentStatus(context.Background(), resp.ProviderReference)
+		if err != nil || st.Amount == nil || *st.Amount != 2015 {
+			t.Fatalf("iteration %d: status amount = %v (err %v), want 2015", i, st, err)
+		}
+	}
+}
 
 func TestCreatePayment_RejectsAmountBelowMinimum(t *testing.T) {
 	a := NewAdapter()
@@ -43,8 +82,8 @@ func TestCreatePayment_Success(t *testing.T) {
 	if !strings.HasPrefix(resp.ProviderReference, "SBX-") {
 		t.Errorf("expected reference to start with SBX-, got %q", resp.ProviderReference)
 	}
-	if resp.Amount < 15001 || resp.Amount > 15099 {
-		t.Errorf("expected amount to include 1-99 unique suffix, got %d", resp.Amount)
+	if resp.Amount != 15000 {
+		t.Errorf("expected amount to equal the requested amount (no suffix), got %d", resp.Amount)
 	}
 	if resp.QRISData == nil || *resp.QRISData == "" {
 		t.Errorf("expected QRISData to be set")

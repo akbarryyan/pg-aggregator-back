@@ -1051,3 +1051,46 @@ func TestRetryMerchantCallback_PaymentLookupErrorChangesNothing(t *testing.T) {
 		t.Errorf("nothing may be created or sent: created=%d hosts=%v", len(callbackRepo.created), hosts)
 	}
 }
+
+// The callback `amount` stays the merchant's nominal; the fee and the grand
+// total ride alongside as additive fields and are always present.
+func TestNotifyMerchantPaymentEvent_PayloadCarriesFeeAndTotal(t *testing.T) {
+	cases := []struct {
+		name               string
+		fee                int64
+		wantFee, wantTotal float64
+	}{
+		{"customer bears fee", 15, 15, 2015},
+		{"merchant bears fee", 0, 0, 2000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, merchantRepo, callbackRepo := newCallbackTestService(t)
+			merchantID := uuid.New()
+			merchantRepo.byID[merchantID] = &merchant.Merchant{ID: merchantID}
+			svc.NotifyMerchantPaymentEvent(context.Background(), &payment.Payment{
+				ID: uuid.New(), Reference: "PAY-FEE", MerchantID: merchantID,
+				Status: payment.StatusPaid, Amount: 2000, FeeAmount: tc.fee,
+				Currency: payment.CurrencyIDR, CallbackURL: strPtr("https://merchant.example/hook"),
+			}, "payment.paid", false)
+
+			if len(callbackRepo.byID) != 1 {
+				t.Fatalf("expected 1 queued delivery, got %d", len(callbackRepo.byID))
+			}
+			for _, d := range callbackRepo.byID {
+				got := d.RequestPayload
+				if got["amount"] != int64(2000) {
+					t.Errorf("amount must stay nominal 2000, got %v", got["amount"])
+				}
+				fee, ok := got["fee_amount"]
+				if !ok || fee != int64(tc.wantFee) {
+					t.Errorf("fee_amount = %v (present=%v), want %v", fee, ok, tc.wantFee)
+				}
+				total, ok := got["total_amount"]
+				if !ok || total != int64(tc.wantTotal) {
+					t.Errorf("total_amount = %v (present=%v), want %v", total, ok, tc.wantTotal)
+				}
+			}
+		})
+	}
+}

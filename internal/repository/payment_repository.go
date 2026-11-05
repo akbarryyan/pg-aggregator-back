@@ -22,7 +22,8 @@ const paymentSelectCols = `
 			id, reference, merchant_id, amount, currency, payment_method,
 			provider_name, provider_reference, status, description,
 			customer_name, customer_email, qris_data, callback_url,
-			environment, payment_link_id, expires_at, paid_at, created_at, updated_at
+			environment, payment_link_id, expires_at, paid_at, created_at, updated_at,
+			fee_amount
 `
 
 func scanPayment(scanner interface {
@@ -33,6 +34,7 @@ func scanPayment(scanner interface {
 		&p.ProviderName, &p.ProviderReference, &p.Status, &p.Description,
 		&p.CustomerName, &p.CustomerEmail, &p.QRISData, &p.CallbackURL,
 		&p.Environment, &p.PaymentLinkID, &p.ExpiresAt, &p.PaidAt, &p.CreatedAt, &p.UpdatedAt,
+		&p.FeeAmount,
 	)
 }
 
@@ -45,9 +47,10 @@ func (r *PaymentRepository) Create(ctx context.Context, p *payment.Payment) erro
 			id, reference, merchant_id, amount, currency, payment_method,
 			provider_name, provider_reference, status, description,
 			customer_name, customer_email, qris_data, callback_url,
-			environment, payment_link_id, expires_at, created_at, updated_at
+			environment, payment_link_id, expires_at, created_at, updated_at,
+			fee_amount
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
 		)
 		RETURNING id, created_at, updated_at
 	`
@@ -57,6 +60,7 @@ func (r *PaymentRepository) Create(ctx context.Context, p *payment.Payment) erro
 		p.ProviderName, p.ProviderReference, p.Status, p.Description,
 		p.CustomerName, p.CustomerEmail, p.QRISData, p.CallbackURL,
 		p.Environment, p.PaymentLinkID, p.ExpiresAt, p.CreatedAt, p.UpdatedAt,
+		p.FeeAmount,
 	).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 
 	if err != nil {

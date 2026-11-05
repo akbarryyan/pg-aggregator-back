@@ -8,9 +8,9 @@ x-dev: &dev
   build:
     context: .
     target: dev
-  # Always rebuilt from the Dockerfile's dev stage; it copies no source, so
-  # this is a cache hit unless the Dockerfile changed.
-  pull_policy: build
+  # Built only when the image is missing locally, so `docker compose up -d`
+  # and `make migrate` never rebuild. After changing the Dockerfile, rebuild
+  # explicitly: `docker compose build` (see RUNNING.md, "Berhenti").
   # Run as you so files air writes under tmp/ aren't root-owned and the
   # chmod-600 .config.toml stays readable.
   user: "${HOST_UID:-1000}:${HOST_GID:-1000}"

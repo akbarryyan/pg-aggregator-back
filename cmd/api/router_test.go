@@ -257,12 +257,12 @@ func TestRouter_CreatePayment_Webhook_StatusPaid_EndToEnd(t *testing.T) {
 		))
 
 	merchantCols := []string{
-		"id", "name", "email", "phone", "business_name", "webhook_url", "webhook_secret", "is_active", "created_at", "updated_at",
+		"id", "name", "email", "phone", "business_name", "webhook_url", "webhook_secret", "is_active", "fee_bearer", "created_at", "updated_at",
 	}
 	mock.ExpectQuery(`SELECT .* FROM merchants\s+WHERE id = \$1`).
 		WithArgs(merchantID).
 		WillReturnRows(sqlmock.NewRows(merchantCols).AddRow(
-			merchantID, "Acme", "acme@example.com", "", "Acme Business", nil, nil, true, now, now,
+			merchantID, "Acme", "acme@example.com", "", "Acme Business", nil, nil, true, "merchant", now, now,
 		))
 	mock.ExpectExec(`UPDATE merchant_api_keys`).WillReturnResult(sqlmock.NewResult(0, 1))
 

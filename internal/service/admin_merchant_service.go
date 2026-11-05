@@ -232,6 +232,24 @@ func (s *AdminMerchantService) SetMerchantActive(ctx context.Context, id uuid.UU
 	return merchant.ToMerchantResponse(m), nil
 }
 
+// SetFeeBearer changes who pays the provider fee for a merchant. Admin only:
+// it is deliberately NOT part of UpdateMerchantRequest, which merchants also
+// use to edit their own business profile.
+func (s *AdminMerchantService) SetFeeBearer(ctx context.Context, id uuid.UUID, feeBearer string) (*merchant.MerchantResponse, error) {
+	if !merchant.IsValidFeeBearer(feeBearer) {
+		return nil, merchant.ErrInvalidFeeBearer
+	}
+	// SetFeeBearer reports ErrMerchantNotFound when no row matched.
+	if err := s.merchantRepo.SetFeeBearer(ctx, id, feeBearer); err != nil {
+		return nil, err
+	}
+	m, err := s.merchantRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return merchant.ToMerchantResponse(m), nil
+}
+
 func (s *AdminMerchantService) ListMerchantPayments(ctx context.Context, merchantID uuid.UUID, limit, offset int) (*PaginatedPayments, error) {
 	return s.paymentService.ListPayments(ctx, "", "", &merchantID, nil, nil, "", limit, offset)
 }

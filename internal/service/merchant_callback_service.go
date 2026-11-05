@@ -106,7 +106,9 @@ func (s *PaymentService) NotifyMerchantPaymentEvent(ctx context.Context, p *paym
 		"payment_id":   p.ID.String(),
 		"reference":    p.Reference,
 		"status":       p.Status,
-		"amount":       p.Amount,
+		"amount":       p.Amount, // always the merchant nominal
+		"fee_amount":   p.FeeAmount,
+		"total_amount": p.TotalAmount(),
 		"currency":     p.Currency,
 		"merchant_id":  p.MerchantID.String(),
 		"provider":     p.ProviderName,

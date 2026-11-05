@@ -27,6 +27,7 @@ func (r *MerchantRepository) Create(ctx context.Context, req *merchant.CreateMer
 		BusinessName: req.BusinessName,
 		WebhookURL:   req.WebhookURL,
 		IsActive:     true,
+		FeeBearer:    merchant.FeeBearerMerchant, // matches the column default
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -60,13 +61,13 @@ func (r *MerchantRepository) GetByID(ctx context.Context, id uuid.UUID) (*mercha
 	m := &merchant.Merchant{}
 
 	query := `
-		SELECT id, name, email, phone, business_name, webhook_url, webhook_secret, is_active, created_at, updated_at
+		SELECT id, name, email, phone, business_name, webhook_url, webhook_secret, is_active, fee_bearer, created_at, updated_at
 		FROM merchants
 		WHERE id = $1
 	`
 
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
-		&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.WebhookSecret, &m.IsActive, &m.CreatedAt, &m.UpdatedAt,
+		&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.WebhookSecret, &m.IsActive, &m.FeeBearer, &m.CreatedAt, &m.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -94,13 +95,13 @@ func (r *MerchantRepository) GetByEmail(ctx context.Context, email string) (*mer
 	m := &merchant.Merchant{}
 
 	query := `
-		SELECT id, name, email, phone, business_name, webhook_url, is_active, created_at, updated_at
+		SELECT id, name, email, phone, business_name, webhook_url, is_active, fee_bearer, created_at, updated_at
 		FROM merchants
 		WHERE email = $1
 	`
 
 	err := r.db.QueryRowContext(ctx, query, email).Scan(
-		&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.IsActive, &m.CreatedAt, &m.UpdatedAt,
+		&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.IsActive, &m.FeeBearer, &m.CreatedAt, &m.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -179,7 +180,7 @@ func (r *MerchantRepository) ListAdmin(
 	}
 
 	query := `
-		SELECT id, name, email, phone, business_name, webhook_url, is_active, created_at, updated_at
+		SELECT id, name, email, phone, business_name, webhook_url, is_active, fee_bearer, created_at, updated_at
 		FROM merchants
 		WHERE 1=1
 	`
@@ -215,7 +216,7 @@ func (r *MerchantRepository) ListAdmin(
 	for rows.Next() {
 		m := &merchant.Merchant{}
 		if err := rows.Scan(
-			&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.IsActive, &m.CreatedAt, &m.UpdatedAt,
+			&m.ID, &m.Name, &m.Email, &m.Phone, &m.BusinessName, &m.WebhookURL, &m.IsActive, &m.FeeBearer, &m.CreatedAt, &m.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan merchant: %w", err)
 		}
@@ -254,4 +255,19 @@ func (r *MerchantRepository) CountAdmin(ctx context.Context, search string, isAc
 		return 0, fmt.Errorf("failed to count merchants: %w", err)
 	}
 	return count, nil
+}
+
+// SetFeeBearer changes who pays the provider fee. Admin-only at the API layer;
+// the value is validated by the caller and again by the table's CHECK.
+func (r *MerchantRepository) SetFeeBearer(ctx context.Context, id uuid.UUID, feeBearer string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE merchants SET fee_bearer = $2, updated_at = $3 WHERE id = $1`,
+		id, feeBearer, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("failed to set fee bearer: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return merchant.ErrMerchantNotFound
+	}
+	return nil
 }

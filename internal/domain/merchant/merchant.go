@@ -16,10 +16,13 @@ type Merchant struct {
 	// WebhookSecret signs outbound payment webhooks (X-PG-Signature). Never
 	// serialized as part of the general merchant representation — only the
 	// dedicated GET/regenerate webhook-secret endpoints expose it.
-	WebhookSecret *string   `json:"-" db:"webhook_secret"`
-	IsActive      bool      `json:"is_active" db:"is_active"`
-	CreatedAt     time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
+	WebhookSecret *string `json:"-" db:"webhook_secret"`
+	IsActive      bool    `json:"is_active" db:"is_active"`
+	// FeeBearer decides who pays the provider fee: see FeeBearerMerchant /
+	// FeeBearerCustomer. Admin-only; never settable via UpdateMerchantRequest.
+	FeeBearer string    `json:"fee_bearer" db:"fee_bearer"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 type CreateMerchantRequest struct {
@@ -58,6 +61,7 @@ type MerchantResponse struct {
 	BusinessName string    `json:"business_name"`
 	WebhookURL   *string   `json:"webhook_url,omitempty"`
 	IsActive     bool      `json:"is_active"`
+	FeeBearer    string    `json:"fee_bearer"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -71,6 +75,7 @@ func ToMerchantResponse(m *Merchant) *MerchantResponse {
 		BusinessName: m.BusinessName,
 		WebhookURL:   m.WebhookURL,
 		IsActive:     m.IsActive,
+		FeeBearer:    m.FeeBearer,
 		CreatedAt:    m.CreatedAt,
 		UpdatedAt:    m.UpdatedAt,
 	}

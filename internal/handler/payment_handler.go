@@ -207,13 +207,19 @@ func respondCreatePaymentError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, merchant.ErrMerchantInactive):
 		respondError(w, http.StatusForbidden, "Merchant account is inactive")
+	case errors.Is(err, providerPkg.ErrProviderTimeout):
+		// The provider did not answer in time. Checked before the generic
+		// "not available" case; the adapter wraps exactly one sentinel.
+		respondError(w, http.StatusGatewayTimeout, "Payment provider timed out")
 	case errors.Is(err, providerPkg.ErrProviderNotAvailable):
 		respondError(w, http.StatusServiceUnavailable, "Payment provider is temporarily unavailable")
 	case errors.Is(err, providerPkg.ErrUnsupportedPaymentMethod):
 		respondError(w, http.StatusBadRequest, "Unsupported payment method")
 	case errors.Is(err, providerPkg.ErrFeeNotSupported):
 		respondError(w, http.StatusServiceUnavailable, "Fee calculation is not available for this payment provider")
-	case errors.Is(err, payment.ErrProviderError):
+	case errors.Is(err, providerPkg.ErrProviderAPIError), errors.Is(err, payment.ErrProviderError):
+		// The provider answered, but with an error or an invalid response. The
+		// raw upstream text stays in the logs; clients get a fixed message.
 		respondError(w, http.StatusBadGateway, "Payment provider error")
 	default:
 		respondError(w, http.StatusInternalServerError, "Failed to create payment")

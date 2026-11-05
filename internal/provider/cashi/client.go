@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -97,7 +99,7 @@ func (a *CashiAdapter) CreatePayment(ctx context.Context, req *provider.Provider
 
 	expiresAt, err := time.ParseInLocation(cashiExpiresAtLayout, cashiResp.ExpiresAt, cashiTimeLocation)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse expires_at from cashi: %w", err)
+		return nil, fmt.Errorf("failed to parse expires_at from cashi: %w: %w", providerPkg.ErrProviderAPIError, err)
 	}
 
 	rawResponse := map[string]interface{}{
@@ -207,6 +209,17 @@ func (a *CashiAdapter) NormalizeStatus(providerStatus string) string {
 	return "pending"
 }
 
+// classifyTransportError maps a failed HTTP round trip to exactly one provider
+// sentinel: a timeout (the provider did not answer in time) or "not available"
+// (connection refused, DNS failure, cancelled context, ...).
+func classifyTransportError(err error) error {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return providerPkg.ErrProviderTimeout
+	}
+	return providerPkg.ErrProviderNotAvailable
+}
+
 func (a *CashiAdapter) doRequest(ctx context.Context, method, path string, reqBody, respBody interface{}) error {
 	url := a.baseURL + path
 
@@ -229,13 +242,13 @@ func (a *CashiAdapter) doRequest(ctx context.Context, method, path string, reqBo
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to execute request: %w", err)
+		return fmt.Errorf("failed to execute request: %w: %w", classifyTransportError(err), err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+		return fmt.Errorf("failed to read response: %w: %w", classifyTransportError(err), err)
 	}
 
 	if resp.StatusCode >= 400 {
@@ -247,7 +260,7 @@ func (a *CashiAdapter) doRequest(ctx context.Context, method, path string, reqBo
 
 	if respBody != nil {
 		if err := json.Unmarshal(body, respBody); err != nil {
-			return fmt.Errorf("failed to unmarshal response: %w", err)
+			return fmt.Errorf("failed to unmarshal response: %w: %w", providerPkg.ErrProviderAPIError, err)
 		}
 	}
 

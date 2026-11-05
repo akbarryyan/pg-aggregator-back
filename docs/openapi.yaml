@@ -267,8 +267,9 @@ paths:
       responses:
         '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '502': { description: Provider error }
-        '503': { description: Provider unavailable }
+        '502': { description: The payment provider answered with an error or an invalid response. No payment was recorded. }
+        '503': { description: No payment provider is available right now, or the provider could not be reached. No payment was recorded. }
+        '504': { description: The payment provider did not answer in time. No payment was recorded. }
 
   /admin/payments/export:
     get:
@@ -763,6 +764,9 @@ paths:
         '403': { description: Merchant account is inactive, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '409': { description: A request with this Idempotency-Key is still being processed (retry shortly), content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '422': { description: Idempotency-Key was already used with a different request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '502': { description: The payment provider answered with an error or an invalid response. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
+        '503': { description: No payment provider is available right now, or the provider could not be reached. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
+        '504': { description: The payment provider did not answer in time. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
 
   /merchant/payments/export:
     get:
@@ -994,6 +998,9 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+        '502': { description: The payment provider answered with an error or an invalid response. No payment was recorded. }
+        '503': { description: No payment provider is available right now, or the provider could not be reached. No payment was recorded. }
+        '504': { description: The payment provider did not answer in time. No payment was recorded. }
 
   # ---------------------------------------------------------------- Merchant API (API key)
   /payments:
@@ -1030,8 +1037,9 @@ paths:
         '403': { description: Merchant inactive (rejected at authentication and again on creation) }
         '409': { description: A request with this Idempotency-Key is still being processed (retry shortly), content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '422': { description: Idempotency-Key was already used with a different request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
-        '502': { description: Provider error }
-        '503': { description: Provider unavailable }
+        '502': { description: The payment provider answered with an error or an invalid response. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
+        '503': { description: No payment provider is available right now, or the provider could not be reached. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
+        '504': { description: The payment provider did not answer in time. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /payments/{id}:

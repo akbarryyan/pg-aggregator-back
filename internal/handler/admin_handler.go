@@ -14,7 +14,6 @@ import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
-	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
@@ -158,10 +157,6 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		if respondInvalidCallbackURL(w, err) {
 			return
 		}
-		if errors.Is(err, providerPkg.ErrFeeNotSupported) {
-			respondCreatePaymentError(w, err)
-			return
-		}
 		switch err {
 		case payment.ErrInvalidAmount,
 			payment.ErrUnsupportedCurrency,
@@ -176,7 +171,7 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusForbidden, "Merchant account is inactive")
 		default:
 			logger.ErrorfCtx(r.Context(), "Failed to create payment from admin: %v", err)
-			respondError(w, http.StatusInternalServerError, "Failed to create payment")
+			respondCreatePaymentError(w, err)
 		}
 		return
 	}

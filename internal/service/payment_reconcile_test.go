@@ -12,7 +12,6 @@ import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	domainProvider "github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
-	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/google/uuid"
 )
 
@@ -145,42 +144,50 @@ func TestReconcilePayment_ProviderStillPendingWithinGrace_Unchanged(t *testing.T
 }
 
 func TestReconcilePayment_ProviderCheckFails_NotExpired_ReportsError(t *testing.T) {
-	svc, paymentRepo, _, router := newWebhookTestService()
-	p := seedPayment(t, paymentRepo, payment.StatusPending, "REF-R5")
-	p.ExpiresAt = time.Now().Add(10 * time.Minute)
-	paymentRepo.byID[p.ID] = p
-	router.RegisterProvider(&fakeProvider{name: "cashi", statusErr: providerPkg.ErrProviderAPIError})
+	for kind, statusErr := range statusCheckFailures() {
+		t.Run(kind, func(t *testing.T) {
+			svc, paymentRepo, _, router := newWebhookTestService()
+			p := seedPayment(t, paymentRepo, payment.StatusPending, "REF-R5")
+			p.ExpiresAt = time.Now().Add(10 * time.Minute)
+			paymentRepo.byID[p.ID] = p
+			router.RegisterProvider(&fakeProvider{name: "cashi", statusErr: statusErr})
 
-	result, err := svc.ReconcilePayment(context.Background(), p.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Action != "error" {
-		t.Errorf("expected action error when provider check fails, got %q", result.Action)
-	}
-	got, _ := paymentRepo.GetByID(context.Background(), p.ID)
-	if got.Status != payment.StatusPending {
-		t.Errorf("expected status untouched when not past expiry, got %q", got.Status)
+			result, err := svc.ReconcilePayment(context.Background(), p.ID)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Action != "error" {
+				t.Errorf("expected action error when provider check fails, got %q", result.Action)
+			}
+			got, _ := paymentRepo.GetByID(context.Background(), p.ID)
+			if got.Status != payment.StatusPending {
+				t.Errorf("expected status untouched when not past expiry, got %q", got.Status)
+			}
+		})
 	}
 }
 
 func TestReconcilePayment_ProviderCheckFails_PastExpiry_FallsBackToLocalExpire(t *testing.T) {
-	svc, paymentRepo, _, router := newWebhookTestService()
-	p := seedPayment(t, paymentRepo, payment.StatusPending, "REF-R6")
-	p.ExpiresAt = time.Now().Add(-10 * time.Minute) // beyond expireGracePeriod
-	paymentRepo.byID[p.ID] = p
-	router.RegisterProvider(&fakeProvider{name: "cashi", statusErr: providerPkg.ErrProviderAPIError})
+	for kind, statusErr := range statusCheckFailures() {
+		t.Run(kind, func(t *testing.T) {
+			svc, paymentRepo, _, router := newWebhookTestService()
+			p := seedPayment(t, paymentRepo, payment.StatusPending, "REF-R6")
+			p.ExpiresAt = time.Now().Add(-10 * time.Minute) // beyond expireGracePeriod
+			paymentRepo.byID[p.ID] = p
+			router.RegisterProvider(&fakeProvider{name: "cashi", statusErr: statusErr})
 
-	result, err := svc.ReconcilePayment(context.Background(), p.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Action != "expired_local" {
-		t.Errorf("expected fallback local expiry when provider check fails past deadline, got %q", result.Action)
-	}
-	got, _ := paymentRepo.GetByID(context.Background(), p.ID)
-	if got.Status != payment.StatusExpired {
-		t.Errorf("expected status expired, got %q", got.Status)
+			result, err := svc.ReconcilePayment(context.Background(), p.ID)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Action != "expired_local" {
+				t.Errorf("expected fallback local expiry when provider check fails past deadline, got %q", result.Action)
+			}
+			got, _ := paymentRepo.GetByID(context.Background(), p.ID)
+			if got.Status != payment.StatusExpired {
+				t.Errorf("expected status expired, got %q", got.Status)
+			}
+		})
 	}
 }
 

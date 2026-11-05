@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -404,11 +405,26 @@ func TestProcessWebhook_WebhookAmountMismatchStillReconciles(t *testing.T) {
 	}
 }
 
+// statusCheckFailures are the failure kinds a provider status check can
+// return. The webhook and reconcile paths must treat all of them identically:
+// the distinction (timeout / unavailable / API error) matters only to the
+// create-payment HTTP mapping.
+func statusCheckFailures() map[string]error {
+	return map[string]error{
+		"plain error":        errors.New("boom"),
+		"timeout":            fmt.Errorf("x: %w", providerPkg.ErrProviderTimeout),
+		"not available":      fmt.Errorf("x: %w", providerPkg.ErrProviderNotAvailable),
+		"provider API error": fmt.Errorf("x: %w", providerPkg.ErrProviderAPIError),
+	}
+}
+
 func TestProcessWebhook_VerificationFailures(t *testing.T) {
 	cases := map[string]*fakeProvider{
-		"provider call fails": {name: "cashi", parseResp: paidWebhook("REF-VF", nil), statusErr: providerPkg.ErrProviderAPIError},
 		"provider not settled": {name: "cashi", parseResp: paidWebhook("REF-VF", nil),
 			statusResp: &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPending, Amount: ptrInt64(15000)}},
+	}
+	for kind, statusErr := range statusCheckFailures() {
+		cases["provider call fails: "+kind] = &fakeProvider{name: "cashi", parseResp: paidWebhook("REF-VF", nil), statusErr: statusErr}
 	}
 	for name, prov := range cases {
 		t.Run(name, func(t *testing.T) {

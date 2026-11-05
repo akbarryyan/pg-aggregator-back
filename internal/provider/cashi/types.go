@@ -1,5 +1,7 @@
 package cashi
 
+import providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
+
 const (
 	StatusSettled = "SETTLED"
 )
@@ -73,3 +75,9 @@ type CashiError struct {
 func (e *CashiError) Error() string {
 	return e.Message
 }
+
+// Unwrap lets callers classify every Cashi error response (HTTP 4xx/5xx,
+// success:false, missing order id) with errors.Is(err, ErrProviderAPIError):
+// the provider answered, but with an error. Cashi's raw response body stays in
+// the message for the logs and is never shown to API clients.
+func (e *CashiError) Unwrap() error { return providerPkg.ErrProviderAPIError }

@@ -19,7 +19,7 @@ var paymentCols = []string{
 	"provider_name", "provider_reference", "status", "description",
 	"customer_name", "customer_email", "qris_data", "callback_url",
 	"environment", "payment_link_id", "expires_at", "paid_at", "created_at", "updated_at",
-	"fee_amount",
+	"fee_amount", "merchant_net_amount",
 }
 
 func paymentRow(p *payment.Payment) []driver.Value {
@@ -28,7 +28,7 @@ func paymentRow(p *payment.Payment) []driver.Value {
 		p.ProviderName, p.ProviderReference, p.Status, p.Description,
 		p.CustomerName, p.CustomerEmail, p.QRISData, p.CallbackURL,
 		p.Environment, p.PaymentLinkID, p.ExpiresAt, p.PaidAt, p.CreatedAt, p.UpdatedAt,
-		p.FeeAmount,
+		p.FeeAmount, p.MerchantNetAmount,
 	}
 }
 
@@ -182,25 +182,21 @@ func TestPaymentRepository_List(t *testing.T) {
 
 const updateStatusSQL = `(?s)UPDATE payments p SET status = \$1, paid_at = \$2, updated_at = \$3.*FROM \(SELECT id, status FROM payments WHERE id = \$4 FOR UPDATE\) prev.*WHERE p.id = prev.id AND p.status IN \(%s\).*RETURNING prev.status`
 
-func TestPaymentRepository_UpdateStatus_PaidFromPendingOrExpired(t *testing.T) {
+// paid and refunded are never written through UpdateStatus: paid needs the
+// atomic ledger credit of MarkPaid, refunded belongs to the refund repository.
+// The guard fires before any SQL, so no expectations are set.
+func TestPaymentRepository_UpdateStatus_RefusesPaidAndRefunded(t *testing.T) {
 	db, mock := newMockDB(t)
 	repo := NewPaymentRepository(db)
-	id := uuid.New()
 	paidAt := time.Now()
 
-	mock.ExpectQuery(fmt.Sprintf(updateStatusSQL, `\$5, \$6`)).
-		WithArgs(payment.StatusPaid, &paidAt, sqlmock.AnyArg(), id, payment.StatusPending, payment.StatusExpired).
-		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(payment.StatusExpired))
-
-	prev, err := repo.UpdateStatus(context.Background(), id, payment.StatusPaid, &paidAt)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if prev != payment.StatusExpired {
-		t.Errorf("previous status = %q, want expired", prev)
+	for _, st := range []string{payment.StatusPaid, payment.StatusRefunded} {
+		if _, err := repo.UpdateStatus(context.Background(), uuid.New(), st, &paidAt); !errors.Is(err, payment.ErrInvalidStatusTransition) {
+			t.Errorf("UpdateStatus(%s) err = %v, want ErrInvalidStatusTransition", st, err)
+		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("unmet expectations: %v", err)
+		t.Errorf("unexpected SQL: %v", err)
 	}
 }
 
@@ -247,10 +243,10 @@ func TestPaymentRepository_UpdateStatus_NoRowsPaymentNotFound(t *testing.T) {
 	repo := NewPaymentRepository(db)
 	id := uuid.New()
 
-	mock.ExpectQuery(fmt.Sprintf(updateStatusSQL, `\$5, \$6`)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(fmt.Sprintf(updateStatusSQL, `\$5`)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`SELECT .* FROM payments WHERE id = \$1`).WithArgs(id).WillReturnError(sql.ErrNoRows)
 
-	_, err := repo.UpdateStatus(context.Background(), id, payment.StatusPaid, nil)
+	_, err := repo.UpdateStatus(context.Background(), id, payment.StatusExpired, nil)
 	if !errors.Is(err, payment.ErrPaymentNotFound) {
 		t.Fatalf("expected ErrPaymentNotFound, got %v", err)
 	}

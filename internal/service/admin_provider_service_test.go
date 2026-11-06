@@ -159,7 +159,7 @@ func TestAdminProviderService_ListReconciliationCandidates(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", uuid.New(), int64(10000), "IDR", "qris",
 			"", nil, payment.StatusPending, "desc", nil, nil, nil, nil,
-			"production", now.Add(time.Hour), nil, now, now, int64(15), "Acme",
+			"production", now.Add(time.Hour), nil, now, now, int64(15), int64(0), "Acme",
 		))
 
 	result, err := svc.ListReconciliationCandidates(context.Background(), 50)

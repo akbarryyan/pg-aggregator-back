@@ -90,7 +90,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, providerName string
 		logger.InfofCtx(ctx, "Payment %s already paid (duplicate webhook)", p.Reference)
 		s.failWebhookEvent(ctx, event.ID, &p.ID, webhookPayload.ProviderReference, eventType, webhookPayload.Status, payment.ErrDuplicateWebhook)
 		return payment.ErrDuplicateWebhook
-	case payment.StatusFailed, payment.StatusCancelled:
+	case payment.StatusFailed, payment.StatusCancelled, payment.StatusRefunded:
 		logger.WarnfCtx(ctx, "Payment %s already in terminal status: %s", p.Reference, p.Status)
 		s.failWebhookEvent(ctx, event.ID, &p.ID, webhookPayload.ProviderReference, eventType, webhookPayload.Status, payment.ErrPaymentAlreadyTerminal)
 		return payment.ErrPaymentAlreadyTerminal
@@ -132,7 +132,13 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, providerName string
 		paidAt = &now
 	}
 
-	previous, err := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusPaid, paidAt)
+	net, err := merchantNetFor(p)
+	if err != nil {
+		logger.ErrorfCtx(ctx, "Payment %s: cannot compute merchant net: %v", p.Reference, err)
+		s.failWebhookEvent(ctx, event.ID, &p.ID, webhookPayload.ProviderReference, eventType, webhookPayload.Status, err)
+		return err
+	}
+	previous, err := s.paymentRepo.MarkPaid(ctx, p.ID, paidAt, net)
 	if err != nil {
 		if errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
 			// Lost the race to a concurrent webhook or reconcile run that
@@ -152,6 +158,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, providerName string
 	}
 	p.Status = payment.StatusPaid
 	p.PaidAt = paidAt
+	p.MerchantNetAmount = net
 
 	s.completeWebhookEvent(ctx, event.ID, p.ID, webhookPayload.ProviderReference, eventType, payment.StatusPaid)
 

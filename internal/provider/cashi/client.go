@@ -42,7 +42,7 @@ const requestTimeout = 10 * time.Second
 
 // feeBasisPoints is Cashi's percentage fee (0.7%), deducted from the gross
 // amount at settlement (seen in production: Rp 2.000 -> Rp 1.986 net).
-const feeBasisPoints = 70
+const feeBasisPoints = fee.ProviderBasisPoints
 
 // QuoteTotal tells the total a customer must pay so the merchant still nets
 // the nominal after Cashi's fee (see internal/fee for the rounding rule).

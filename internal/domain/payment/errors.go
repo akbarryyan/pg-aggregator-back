@@ -4,7 +4,7 @@ import "errors"
 
 var (
 	ErrPaymentNotFound          = errors.New("payment not found")
-	ErrInvalidAmount            = errors.New("amount must be greater than 0")
+	ErrInvalidAmount            = errors.New("amount must be greater than 0 and at most 1000000000000")
 	ErrUnsupportedCurrency      = errors.New("unsupported currency")
 	ErrPaymentMethodRequired    = errors.New("payment method is required")
 	ErrUnsupportedPaymentMethod = errors.New("unsupported payment method")

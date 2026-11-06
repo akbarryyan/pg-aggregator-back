@@ -79,3 +79,30 @@ func TestQuoteTotalBasisPoints_Invalid(t *testing.T) {
 		t.Errorf("MaxNominal: got total %d fee %d err %v", total, fee, err)
 	}
 }
+
+func TestMerchantNetBasisPoints(t *testing.T) {
+	cases := []struct {
+		nominal, bps, net, fee int64
+	}{
+		{10000, 70, 9930, 70}, // contoh spec: 10.000 -> 9.930
+		{2000, 70, 1986, 14},  // 2000*70/10000 = 14.0 -> 14 (pas, tanpa pembulatan)
+		{100, 70, 99, 1},      // 0.7 dibulatkan ke atas -> 1
+		{1, 70, 0, 1},         // sangat kecil: fee membulat ke atas
+		{10000, 0, 10000, 0},  // bps 0: tanpa fee
+	}
+	for _, c := range cases {
+		net, fee, err := MerchantNetBasisPoints(c.nominal, c.bps)
+		if err != nil || net != c.net || fee != c.fee {
+			t.Errorf("MerchantNetBasisPoints(%d,%d) = (%d,%d,%v), want (%d,%d,nil)", c.nominal, c.bps, net, fee, err, c.net, c.fee)
+		}
+	}
+	if _, _, err := MerchantNetBasisPoints(0, 70); err == nil {
+		t.Error("nominal 0 must be rejected")
+	}
+	if _, _, err := MerchantNetBasisPoints(MaxNominal+1, 70); err == nil {
+		t.Error("nominal above MaxNominal must be rejected")
+	}
+	if _, _, err := MerchantNetBasisPoints(1000, 10000); err == nil {
+		t.Error("bps 10000 must be rejected")
+	}
+}

@@ -271,3 +271,41 @@ func (r *MerchantRepository) SetFeeBearer(ctx context.Context, id uuid.UUID, fee
 	}
 	return nil
 }
+
+// GetPayoutAccount returns the merchant's payout account, or nil when none is
+// set. The table's all-or-none CHECK means the three columns are either all
+// NULL or all set.
+func (r *MerchantRepository) GetPayoutAccount(ctx context.Context, id uuid.UUID) (*merchant.PayoutAccount, error) {
+	var bank, number, holder sql.NullString
+	err := r.db.QueryRowContext(ctx,
+		`SELECT payout_bank_name, payout_account_number, payout_account_holder FROM merchants WHERE id = $1`, id).
+		Scan(&bank, &number, &holder)
+	if err == sql.ErrNoRows {
+		return nil, merchant.ErrMerchantNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get payout account: %w", err)
+	}
+	if !bank.Valid || !number.Valid || !holder.Valid {
+		return nil, nil
+	}
+	return &merchant.PayoutAccount{BankName: bank.String, AccountNumber: number.String, AccountHolder: holder.String}, nil
+}
+
+// SetPayoutAccount stores the merchant's payout account. Callers validate and
+// trim; the table's all-or-none CHECK is the backstop. Existing payouts keep
+// their own snapshot and are unaffected.
+func (r *MerchantRepository) SetPayoutAccount(ctx context.Context, id uuid.UUID, bank, number, holder string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE merchants
+		    SET payout_bank_name = $2, payout_account_number = $3, payout_account_holder = $4, updated_at = $5
+		  WHERE id = $1`,
+		id, bank, number, holder, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("failed to set payout account: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return merchant.ErrMerchantNotFound
+	}
+	return nil
+}

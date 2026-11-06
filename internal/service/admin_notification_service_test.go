@@ -39,7 +39,7 @@ func TestAdminNotificationService_ListNotifications(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", uuid.New(), int64(1000), "IDR", "qris",
 			"cashi", nil, "expired", "d", nil, nil, nil, nil,
-			"production", now, nil, now, now, int64(0), "Acme",
+			"production", now, nil, now, now, int64(0), int64(0), "Acme",
 		))
 
 	result, err := svc.ListNotifications(context.Background(), 30)
@@ -68,7 +68,7 @@ func TestAdminNotificationService_ListMerchantNotifications(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", merchantID, int64(1000), "IDR", "qris",
 			"cashi", nil, "failed", "d", nil, nil, nil, nil,
-			"production", now, nil, now, now, int64(0), "Acme",
+			"production", now, nil, now, now, int64(0), int64(0), "Acme",
 		))
 
 	result, err := svc.ListMerchantNotifications(context.Background(), merchantID, "production", 30)
@@ -78,4 +78,15 @@ func TestAdminNotificationService_ListMerchantNotifications(t *testing.T) {
 	if result.Total != 1 {
 		t.Fatalf("expected 1 notification, got %d", result.Total)
 	}
+}
+
+// expectEmptyAdminFeed queues the three queries ListNotifications runs, all
+// returning no rows.
+func expectEmptyAdminFeed(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT[\s\S]*FROM webhook_events\s+WHERE 1=1`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "payment_id", "provider_name", "provider_reference", "event_type", "status", "processed_at", "is_processed", "processing_error", "created_at",
+		}))
+	mock.ExpectQuery(`SELECT[\s\S]*FROM payments p`).WillReturnRows(sqlmock.NewRows(adminPaymentCols))
+	mock.ExpectQuery(`SELECT[\s\S]*FROM payments p`).WillReturnRows(sqlmock.NewRows(adminPaymentCols))
 }

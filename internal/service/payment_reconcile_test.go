@@ -485,7 +485,7 @@ func TestReconcilePayment_LosesRaceToConcurrentSettlement(t *testing.T) {
 			router.RegisterProvider(&fakeProvider{name: "cashi", statusResp: tc.providerResp,
 				onStatus: func() {
 					now := time.Now()
-					if _, err := paymentRepo.UpdateStatus(context.Background(), p.ID, payment.StatusPaid, &now); err != nil {
+					if _, err := paymentRepo.MarkPaid(context.Background(), p.ID, &now, 0); err != nil {
 						t.Errorf("simulated winner failed: %v", err)
 					}
 				}})
@@ -550,5 +550,23 @@ func TestReconcileRecentPayments_ExpiredWindow(t *testing.T) {
 	}
 	if got, _ := paymentRepo.GetByID(context.Background(), recent.ID); got.Status != payment.StatusPaid {
 		t.Errorf("expired 3h ago: status = %q, want paid", got.Status)
+	}
+}
+
+func TestReconcilePayment_RefundedIsSkipped(t *testing.T) {
+	svc, paymentRepo, _, router := newWebhookTestService()
+	p := seedPayment(t, paymentRepo, payment.StatusRefunded, "REF-R-REFUNDED")
+	router.RegisterProvider(&fakeProvider{name: "cashi", statusResp: &domainProvider.NormalizedPaymentStatus{Status: "paid"}})
+
+	result, err := svc.ReconcilePayment(context.Background(), p.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "skipped" || result.CurrentStatus != payment.StatusRefunded {
+		t.Fatalf("result = %+v", result)
+	}
+	got, _ := paymentRepo.GetByID(context.Background(), p.ID)
+	if got.Status != payment.StatusRefunded || len(paymentRepo.markPaidNets) != 0 {
+		t.Fatalf("status=%q markPaid=%v", got.Status, paymentRepo.markPaidNets)
 	}
 }

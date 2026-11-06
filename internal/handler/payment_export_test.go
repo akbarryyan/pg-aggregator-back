@@ -22,7 +22,7 @@ var exportPaymentCols = []string{
 	"provider_name", "provider_reference", "status", "description",
 	"customer_name", "customer_email", "qris_data", "callback_url",
 	"environment", "expires_at", "paid_at", "created_at", "updated_at",
-	"fee_amount", "merchant_name",
+	"fee_amount", "merchant_net_amount", "merchant_name",
 }
 
 func exportService(t *testing.T) (*service.AdminPaymentService, sqlmock.Sqlmock) {
@@ -37,7 +37,7 @@ func exportService(t *testing.T) (*service.AdminPaymentService, sqlmock.Sqlmock)
 		WillReturnRows(sqlmock.NewRows(exportPaymentCols).AddRow(
 			uuid.New(), "PAY-CSV", uuid.New(), int64(2000), "IDR", "qris",
 			"cashi", nil, "paid", "desc", nil, nil, nil, nil,
-			"production", time.Now(), nil, time.Now(), time.Now(), int64(15), "Acme",
+			"production", time.Now(), nil, time.Now(), time.Now(), int64(15), int64(0), "Acme",
 		))
 	return svc, mock
 }

@@ -15,8 +15,9 @@ sebelumnya hanya tersirat dari kode, tidak didokumentasikan di mana pun.
 | `expired` | Ya, kecuali pembayaran terlambat (`expired → paid`) | Lewat `expires_at` tanpa dibayar |
 | `failed` | Ya | Provider melaporkan gagal (mis. QR dibatalkan) |
 | `cancelled` | Ya | Dibatalkan (mis. oleh merchant/admin) |
+| `refunded` | Ya, tanpa jalan keluar | Refund **penuh** dicatat admin atas payment `paid`: seluruh net merchant sudah dikembalikan (lihat "Refund dan Saldo Merchant") |
 
-`IsTerminalStatus(status)` — `paid`, `expired`, `failed`, `cancelled`
+`IsTerminalStatus(status)` — `paid`, `expired`, `failed`, `cancelled`, `refunded`
 (`expired` tetap dianggap terminal oleh fungsi ini; satu-satunya jalan keluar
 dari status terminal adalah `expired → paid`, lihat di bawah).
 
@@ -41,13 +42,19 @@ dari status terminal adalah `expired → paid`, lihat di bawah).
         │           ┌───────────┐
         └──────────▶│ cancelled │  (final)
                     └───────────┘
+
+        paid ──(refund penuh oleh admin)──▶ ┌──────────┐
+                                            │ refunded │  (final)
+                                            └──────────┘
 ```
 
 Satu-satunya status non-terminal adalah `pending`. Semua transisi berasal
 dari `pending`, dengan satu pengecualian: `expired ──▶ paid` (pembayaran
 terlambat — pelanggan benar-benar membayar setelah payment kedaluwarsa
-secara lokal). Tidak ada jalan kembali ke `pending`, dan `paid`, `failed`,
-`cancelled` benar-benar final.
+secara lokal), dan satu transisi dari `paid`: `paid ──▶ refunded`
+(refund penuh oleh admin). Tidak ada jalan kembali ke `pending`, dan
+`failed`, `cancelled`, `refunded` benar-benar final; `paid` hanya bisa
+keluar ke `refunded`.
 
 ## Aturan (ditegakkan di kode)
 
@@ -61,6 +68,7 @@ yang boleh pindah ke `newStatus`:
 | `expired` | `pending` |
 | `failed` | `pending` |
 | `cancelled` | `pending` |
+| `refunded` | `paid` |
 
 `payment.CanTransitionTo(currentStatus, newStatus)` hanya mengecek apakah
 `currentStatus` ada di daftar itu — jadi `currentStatus == newStatus`
@@ -72,6 +80,16 @@ Invarian: **hanya settlement yang dilaporkan provider yang boleh menulis
 "mark paid" manual, sehingga `expired → paid` tidak bisa menghidupkan
 payment yang ditinggalkan dengan sendirinya.
 
+Invarian `refunded`: **hanya `paid → refunded`, hanya lewat refund penuh
+admin** (`POST /admin/payments/{id}/refund`). Transisi ini ditulis oleh
+repository refund di transaksinya sendiri (`UPDATE ... WHERE status =
+'paid'`), bukan lewat `UpdateStatus`/`MarkPaid`. Webhook, reconcile, dan
+expire job **tidak pernah menyentuh** payment `refunded`: webhook untuk
+payment ini langsung dijawab sebagai sudah terminal
+(`ErrPaymentAlreadyTerminal` -> 200 `ignored`) **sebelum** provider
+ditanya, reconcile melewatinya (`skipped`), dan guard `WHERE` di
+repository menolak penulisan apa pun atasnya.
+
 Aturan ini ditegakkan **dua kali** secara independen (defense-in-depth):
 
 - **Service layer** — `PaymentService.ProcessWebhook` dan
@@ -79,7 +97,9 @@ Aturan ini ditegakkan **dua kali** secara independen (defense-in-depth):
   ([payment_webhook_service.go](../internal/service/payment_webhook_service.go),
   [payment_service.go](../internal/service/payment_service.go)) mengecek
   sebelum menulis.
-- **Repository layer** — `PaymentRepository.UpdateStatus`
+- **Repository layer** — `PaymentRepository.UpdateStatus` (untuk `expired`;
+  `paid` ditulis oleh `MarkPaid`, lihat "Settlement Atomik dan Kredit Saldo",
+  dengan guard yang sama)
   ([payment_repository_update.go](../internal/repository/payment_repository_update.go))
   menjalankan **satu statement `UPDATE` bersyarat** yang mengembalikan
   status sebelumnya:
@@ -154,6 +174,53 @@ bocor — tidak bisa menandai payment lunas.
   huruf besar/kecil) ditolak dengan `ErrProviderMismatch` **sebelum**
   check-status dipanggil, event dicatat `rejected`, dan dibalas **400**.
   Hanya provider pemilik payment yang boleh mengonfirmasi settlement-nya.
+
+## Settlement Atomik dan Kredit Saldo
+
+Invarian: **payment `paid` selalu punya kredit ledger (hanya `production`;
+sandbox tidak pernah)**. Webhook dan reconcile menulis `paid` lewat
+`PaymentRepository.MarkPaid`
+([payment_repository_update.go](../internal/repository/payment_repository_update.go)),
+satu transaksi yang:
+
+1. menjalankan `UPDATE` bersyarat yang sama seperti di atas (guard status
+   asal, `FOR UPDATE`, mengembalikan status sebelumnya) sekaligus mengisi
+   `paid_at` dan `merchant_net_amount`;
+2. untuk payment `environment = 'production'` dengan net > 0, menyisipkan baris
+   `merchant_ledger` bertipe `payment_credit` (`merchant_id` diambil dari baris
+   payment yang terkunci, bukan dari pemanggil);
+3. commit: **keduanya terjadi atau tidak sama sekali**. Unique index
+   `uq_ledger_credit_per_payment` menjamin tidak ada kredit ganda, termasuk
+   saat webhook, reconcile, dan settlement terlambat (`expired → paid`)
+   berlomba; yang kalah mendapat `ErrPaymentAlreadyTerminal`.
+
+**Aturan net merchant** (`merchantNetFor`, ditentukan dari payment itu
+sendiri, bukan dari `fee_bearer` merchant saat ini):
+
+- `fee_amount > 0` (customer menanggung fee): `net = amount`.
+- `fee_amount = 0` (merchant menanggung fee): `net = amount - ceil(amount * 70 / 10000)`
+  (70 bps = `fee.ProviderBasisPoints`). Contoh: 10.000 -> 9.930.
+
+Pembulatan ini bisa berbeda 1-2 rupiah per transaksi dari potongan nyata
+Cashi. Payment `paid` yang dibuat sebelum fitur saldo diisi oleh backfill di
+migrasi 021 (lihat DEPLOY.md 4.6).
+
+## Refund dan Saldo Merchant
+
+Refund hanya dicatat admin (uang ke pembeli dikembalikan manual di luar
+sistem), hanya untuk payment `production` berstatus `paid`. Dalam satu
+transaksi dengan baris payment terkunci: baris `payment_refunds`, ledger
+`refund_debit` (negatif), dan, bila total refund sudah sama dengan
+`merchant_net_amount`, status `paid → refunded` (`paid_at` tidak berubah).
+Jumlah refund per payment tidak boleh melebihi `merchant_net_amount`.
+**Refund sebagian tidak mengubah status** (tetap `paid`). Saldo merchant boleh
+menjadi negatif; tidak ditagih otomatis.
+
+Callback `payment.refunded` dikirim hanya untuk refund **penuh**, lewat
+antrean callback yang sama (tanda tangan dan header `X-PG-Event` sama),
+sesudah commit dan best-effort (gagal mengantre tidak membatalkan refund).
+Payload memuat nominal payment **asli** (`amount`, `fee_amount`,
+`total_amount`) dan `status: "refunded"`; rincian refund tidak disertakan.
 
 ## Callback Merchant
 
@@ -295,7 +362,7 @@ menulis:
 2. **Bukan settlement** (`webhookPayload.Status != paid`) →
    `ErrWebhookIgnored`.
 3. **Payment sudah `paid`** → `ErrDuplicateWebhook`.
-4. **Payment `failed`/`cancelled`** → `ErrPaymentAlreadyTerminal`.
+4. **Payment `failed`/`cancelled`/`refunded`** → `ErrPaymentAlreadyTerminal`.
    (`pending` dan `expired` lanjut ke verifikasi.)
 5. Verifikasi settlement (lihat di atas): mismatch sisi provider →
    `ErrAmountMismatch`; mismatch hanya di webhook →
@@ -325,16 +392,33 @@ untuk cakupan test-nya.
 
 ## Menambah Status Baru
 
-Kalau suatu saat perlu menambah status (mis. `refunded`), checklist supaya
-konsisten:
+Checklist supaya konsisten. Status `refunded` adalah penambahan terakhir dan
+menjalankan setiap butir (ditandai di bawah) sebagai contoh:
 
 1. Tambah konstanta `Status*` di `payment.go` + masukkan ke
-   `IsValidStatus`.
-2. Putuskan apakah terminal → update `IsTerminalStatus`.
+   `IsValidStatus`. *(refunded: `StatusRefunded` ditambahkan.)*
+2. Putuskan apakah terminal → update `IsTerminalStatus`. *(refunded: terminal.)*
 3. Update `AllowedSourceStatuses` (status asal yang boleh pindah ke status
    baru, dan tambahkan status baru ke daftar asal status lain bila perlu).
+   *(refunded: asal hanya `paid`; tidak ada status lain yang boleh pindah
+   dari `refunded`.)*
 4. Cek `webhookEventType`/`eventTypeForStatus` (
    [payment_webhook_service.go](../internal/service/payment_webhook_service.go),
    [merchant_callback_service.go](../internal/service/merchant_callback_service.go))
-   kalau status baru perlu memicu notifikasi merchant.
-5. Update dokumen ini.
+   kalau status baru perlu memicu notifikasi merchant. *(refunded: case
+   eksplisit `payment.refunded`, dikirim hanya untuk refund penuh.)*
+5. Update dokumen ini. *(refunded: dilakukan.)*
+6. Tambah status ke CHECK `payments_status_valid` di migration baru (dan
+   komentar constraint-nya). *(refunded: migration 021.)*
+7. Periksa semua daftar status terminal di service: webhook
+   (`payment_webhook_service.go`) dan reconcile (`payment_service.go`) harus
+   melewati status baru tanpa memanggil provider. *(refunded: keduanya
+   diperbarui.)*
+8. Periksa statistik/dashboard (filter status di
+   `payment_repository_update.go`, bucket di `admin_dashboard_service.go`
+   dan ringkasan merchant) dan tambah bucket bila status perlu terlihat.
+   *(refunded: `refunded_payments`, titik harian `refunded`, entri
+   `status_breakdown`.)*
+9. Perbarui enum status di `docs/openapi.yaml`, event callback bila ada, dan
+   halaman API docs front-end beserta peta status/badge di front-end.
+   *(refunded: dilakukan.)*

@@ -381,7 +381,7 @@ func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Pa
 	}
 
 	switch p.Status {
-	case payment.StatusPaid, payment.StatusFailed, payment.StatusCancelled:
+	case payment.StatusPaid, payment.StatusFailed, payment.StatusCancelled, payment.StatusRefunded:
 		result.Action = "skipped"
 		result.Message = "Payment already in terminal status"
 		return result, nil
@@ -453,7 +453,12 @@ func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Pa
 	// revisited, so a dropped callback would be lost for good).
 	ctx, cancel := detached(ctx)
 	defer cancel()
-	previous, err := s.paymentRepo.UpdateStatus(ctx, p.ID, payment.StatusPaid, paidAt)
+	net, err := merchantNetFor(p)
+	if err != nil {
+		logger.ErrorfCtx(ctx, "Payment %s: cannot compute merchant net: %v", p.Reference, err)
+		return nil, err
+	}
+	previous, err := s.paymentRepo.MarkPaid(ctx, p.ID, paidAt, net)
 	if err != nil {
 		if errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
 			result.Action = "skipped"
@@ -466,6 +471,7 @@ func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Pa
 	late := previous == payment.StatusExpired
 	p.Status = payment.StatusPaid
 	p.PaidAt = paidAt
+	p.MerchantNetAmount = net
 	result.CurrentStatus = payment.StatusPaid
 	result.Action = "updated"
 	result.Message = fmt.Sprintf("Status updated from %s to paid via provider", previous)

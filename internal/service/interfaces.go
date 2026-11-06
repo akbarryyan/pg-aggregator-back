@@ -24,6 +24,7 @@ type paymentRepository interface {
 	GetByReference(ctx context.Context, reference string) (*payment.Payment, error)
 	GetByProviderReference(ctx context.Context, providerReference string) (*payment.Payment, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) (string, error)
+	MarkPaid(ctx context.Context, id uuid.UUID, paidAt *time.Time, merchantNet int64) (string, error)
 	List(ctx context.Context, limit, offset int) ([]*payment.Payment, error)
 	ListExpiredPending(ctx context.Context, before time.Time, limit int) ([]*payment.Payment, error)
 	ListReconcileCandidates(ctx context.Context, now time.Time, pendingWindow, expiredWindow time.Duration, limit int, after *payment.ReconcileCursor) ([]*payment.Payment, error)

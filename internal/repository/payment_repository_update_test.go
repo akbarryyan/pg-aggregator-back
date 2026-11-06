@@ -15,7 +15,7 @@ var adminPaymentCols = []string{
 	"provider_name", "provider_reference", "status", "description",
 	"customer_name", "customer_email", "qris_data", "callback_url",
 	"environment", "expires_at", "paid_at", "created_at", "updated_at",
-	"fee_amount", "merchant_name",
+	"fee_amount", "merchant_net_amount", "merchant_name",
 }
 
 // TestPaymentRepository_ListAdmin_NoFilters verifies the base query (no
@@ -105,7 +105,7 @@ func TestPaymentRepository_ListAdmin_ScansMerchantName(t *testing.T) {
 		p.ProviderName, p.ProviderReference, p.Status, p.Description,
 		p.CustomerName, p.CustomerEmail, p.QRISData, p.CallbackURL,
 		p.Environment, p.ExpiresAt, p.PaidAt, p.CreatedAt, p.UpdatedAt,
-		p.FeeAmount,
+		p.FeeAmount, p.MerchantNetAmount,
 		"Acme Business",
 	)
 	mock.ExpectQuery(`SELECT[\s\S]*FROM payments p`).WillReturnRows(rows)
@@ -158,14 +158,14 @@ func TestPaymentRepository_GetTotalAmount(t *testing.T) {
 	}
 }
 
-var statusBreakdownCols = []string{"total", "paid", "pending", "failed", "expired", "cancelled", "paid_amount"}
+var statusBreakdownCols = []string{"total", "paid", "pending", "failed", "expired", "cancelled", "refunded", "paid_amount"}
 
 func TestPaymentRepository_StatusBreakdownFiltered_NoFilters(t *testing.T) {
 	db, mock := newMockDB(t)
 	repo := NewPaymentRepository(db)
 
 	mock.ExpectQuery(`SELECT[\s\S]*FROM payments\s+WHERE 1=1\s*$`).
-		WillReturnRows(sqlmock.NewRows(statusBreakdownCols).AddRow(10, 4, 3, 1, 1, 1, int64(400000)))
+		WillReturnRows(sqlmock.NewRows(statusBreakdownCols).AddRow(10, 4, 3, 1, 1, 1, 0, int64(400000)))
 
 	result, err := repo.StatusBreakdownFiltered(context.Background(), nil, "")
 	if err != nil {
@@ -183,7 +183,7 @@ func TestPaymentRepository_StatusBreakdownFiltered_MerchantAndEnvironment(t *tes
 
 	mock.ExpectQuery(`AND merchant_id = \$1[\s\S]*AND environment = \$2`).
 		WithArgs(merchantID, payment.EnvironmentSandbox).
-		WillReturnRows(sqlmock.NewRows(statusBreakdownCols).AddRow(3, 1, 1, 0, 1, 0, int64(50000)))
+		WillReturnRows(sqlmock.NewRows(statusBreakdownCols).AddRow(3, 1, 1, 0, 1, 0, 0, int64(50000)))
 
 	result, err := repo.StatusBreakdownFiltered(context.Background(), &merchantID, payment.EnvironmentSandbox)
 	if err != nil {

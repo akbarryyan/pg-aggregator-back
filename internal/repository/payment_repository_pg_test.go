@@ -108,7 +108,7 @@ func TestPG_UpdateStatus_PendingToPaid(t *testing.T) {
 	id := insertPGPayment(t, db, payment.StatusPending)
 	paidAt := time.Now()
 
-	prev, err := repo.UpdateStatus(context.Background(), id, payment.StatusPaid, &paidAt)
+	prev, err := repo.MarkPaid(context.Background(), id, &paidAt, 1000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestPG_UpdateStatus_ExpiredToPaidReportsExpired(t *testing.T) {
 	id := insertPGPayment(t, db, payment.StatusExpired)
 	paidAt := time.Now()
 
-	prev, err := repo.UpdateStatus(context.Background(), id, payment.StatusPaid, &paidAt)
+	prev, err := repo.MarkPaid(context.Background(), id, &paidAt, 1000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestPG_UpdateStatus_ConcurrentPaidExactlyOneWins(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			results[i].prev, results[i].err = repo.UpdateStatus(context.Background(), id, payment.StatusPaid, &paidAt)
+			results[i].prev, results[i].err = repo.MarkPaid(context.Background(), id, &paidAt, 1000)
 		}(i)
 	}
 	close(start)
@@ -197,7 +197,7 @@ func TestPG_UpdateStatus_PaidAfterExpiredWon(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i], errs[i] = repo.UpdateStatus(ctx, id, payment.StatusPaid, &paidAt)
+			results[i], errs[i] = repo.MarkPaid(ctx, id, &paidAt, 1000)
 		}(i)
 	}
 	wg.Wait()
@@ -221,7 +221,7 @@ func TestPG_UpdateStatus_PaidAfterExpiredWon(t *testing.T) {
 func TestPG_UpdateStatus_MissingID(t *testing.T) {
 	repo, _ := newPGRepo(t)
 
-	_, err := repo.UpdateStatus(context.Background(), uuid.New(), payment.StatusPaid, nil)
+	_, err := repo.MarkPaid(context.Background(), uuid.New(), nil, 1000)
 	if !errors.Is(err, payment.ErrPaymentNotFound) {
 		t.Fatalf("expected ErrPaymentNotFound, got %v", err)
 	}

@@ -1,6 +1,7 @@
 package payment
 
 import (
+	"github.com/akbarryyan/pg-aggregator-back/internal/fee"
 	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ const (
 	StatusExpired   = "expired"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
+	StatusRefunded  = "refunded"
 )
 
 const (
@@ -30,22 +32,26 @@ const (
 )
 
 type Payment struct {
-	ID                uuid.UUID `json:"id" db:"id"`
-	Reference         string    `json:"reference" db:"reference"`
-	MerchantID        uuid.UUID `json:"merchant_id" db:"merchant_id"`
-	Amount            int64     `json:"amount" db:"amount"`
-	FeeAmount         int64     `json:"fee_amount" db:"fee_amount"`
-	Currency          string    `json:"currency" db:"currency"`
-	PaymentMethod     string    `json:"payment_method" db:"payment_method"`
-	ProviderName      string    `json:"provider_name" db:"provider_name"`
-	ProviderReference *string   `json:"provider_reference,omitempty" db:"provider_reference"`
-	Status            string    `json:"status" db:"status"`
-	Description       string    `json:"description" db:"description"`
-	CustomerName      *string   `json:"customer_name,omitempty" db:"customer_name"`
-	CustomerEmail     *string   `json:"customer_email,omitempty" db:"customer_email"`
-	QRISData          *string   `json:"qris_data,omitempty" db:"qris_data"`
-	CallbackURL       *string   `json:"callback_url,omitempty" db:"callback_url"`
-	Environment       string    `json:"environment" db:"environment"`
+	ID         uuid.UUID `json:"id" db:"id"`
+	Reference  string    `json:"reference" db:"reference"`
+	MerchantID uuid.UUID `json:"merchant_id" db:"merchant_id"`
+	Amount     int64     `json:"amount" db:"amount"`
+	FeeAmount  int64     `json:"fee_amount" db:"fee_amount"`
+	// MerchantNetAmount is what the merchant keeps once the payment is paid.
+	// It is stored for every paid payment (sandbox included); only production
+	// payments are credited to the ledger. 0 for payments that are not paid.
+	MerchantNetAmount int64   `json:"merchant_net_amount" db:"merchant_net_amount"`
+	Currency          string  `json:"currency" db:"currency"`
+	PaymentMethod     string  `json:"payment_method" db:"payment_method"`
+	ProviderName      string  `json:"provider_name" db:"provider_name"`
+	ProviderReference *string `json:"provider_reference,omitempty" db:"provider_reference"`
+	Status            string  `json:"status" db:"status"`
+	Description       string  `json:"description" db:"description"`
+	CustomerName      *string `json:"customer_name,omitempty" db:"customer_name"`
+	CustomerEmail     *string `json:"customer_email,omitempty" db:"customer_email"`
+	QRISData          *string `json:"qris_data,omitempty" db:"qris_data"`
+	CallbackURL       *string `json:"callback_url,omitempty" db:"callback_url"`
+	Environment       string  `json:"environment" db:"environment"`
 	// PaymentLinkID is set when this payment was spawned by a customer
 	// checking out through a Payment Link (see internal/domain/paymentlink).
 	PaymentLinkID *uuid.UUID `json:"payment_link_id,omitempty" db:"payment_link_id"`
@@ -124,7 +130,9 @@ func ParseEnvironment(raw string) (string, error) {
 }
 
 func (r *CreatePaymentRequest) Validate() error {
-	if r.Amount <= 0 {
+	// The upper bound keeps merchantNetFor (fee.MaxNominal) from failing at
+	// settlement time for a payment the customer already paid.
+	if r.Amount <= 0 || r.Amount > fee.MaxNominal {
 		return ErrInvalidAmount
 	}
 
@@ -267,11 +275,11 @@ func ToPaymentStatusResponse(p *Payment) *PaymentStatusResponse {
 }
 
 func IsTerminalStatus(status string) bool {
-	return status == StatusPaid || status == StatusExpired || status == StatusFailed || status == StatusCancelled
+	return status == StatusPaid || status == StatusExpired || status == StatusFailed || status == StatusCancelled || status == StatusRefunded
 }
 
 func IsValidStatus(status string) bool {
-	validStatuses := []string{StatusPending, StatusPaid, StatusExpired, StatusFailed, StatusCancelled}
+	validStatuses := []string{StatusPending, StatusPaid, StatusExpired, StatusFailed, StatusCancelled, StatusRefunded}
 	for _, s := range validStatuses {
 		if s == status {
 			return true
@@ -281,18 +289,26 @@ func IsValidStatus(status string) bool {
 }
 
 // AllowedSourceStatuses lists the statuses a payment may move to newStatus
-// from. pending can go to any outcome; the only way out of an outcome is
-// expired → paid, for a settlement the provider reports after the payment
-// already expired locally — the customer really paid. Only
-// provider-reported settlements (a verified webhook or reconcile) ever write
-// paid; there is no manual "mark paid" path, so this cannot revive an
-// abandoned payment on its own.
+// from. pending can go to any provider outcome (paid, expired, failed,
+// cancelled). From an outcome there are only two ways on:
+//   - expired → paid, for a settlement the provider reports after the payment
+//     already expired locally — the customer really paid;
+//   - paid → refunded, when an admin records a refund that returns the whole
+//     merchant net (a partial refund leaves the payment paid). refunded is
+//     terminal.
+//
+// Only provider-reported settlements (a verified webhook or reconcile) ever
+// write paid; there is no manual "mark paid" path, so this cannot revive an
+// abandoned payment on its own. The refunded transition is made by the refund
+// repository inside its own transaction, not through UpdateStatus.
 func AllowedSourceStatuses(newStatus string) []string {
 	switch newStatus {
 	case StatusPaid:
 		return []string{StatusPending, StatusExpired}
 	case StatusExpired, StatusFailed, StatusCancelled:
 		return []string{StatusPending}
+	case StatusRefunded:
+		return []string{StatusPaid}
 	default:
 		return nil
 	}

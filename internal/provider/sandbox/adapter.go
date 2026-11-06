@@ -31,7 +31,7 @@ type orderState struct {
 }
 
 // feeBasisPoints mirrors Cashi so merchants can test with identical numbers.
-const feeBasisPoints = 70
+const feeBasisPoints = fee.ProviderBasisPoints
 
 // QuoteTotal tells the total a customer must pay so the merchant still nets
 // the nominal after the (simulated) provider fee.

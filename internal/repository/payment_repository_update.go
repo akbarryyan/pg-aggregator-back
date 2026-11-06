@@ -24,6 +24,11 @@ import (
 // settlement). A CTE + RETURNING (SELECT ... FROM prev) is not used because
 // PostgreSQL evaluates it after the row changed and yields NULL.
 func (r *PaymentRepository) UpdateStatus(ctx context.Context, id uuid.UUID, newStatus string, paidAt *time.Time) (string, error) {
+	// paid must go through MarkPaid (it writes the ledger credit atomically)
+	// and refunded through the refund repository; neither may be written here.
+	if newStatus == payment.StatusPaid || newStatus == payment.StatusRefunded {
+		return "", payment.ErrInvalidStatusTransition
+	}
 	from := payment.AllowedSourceStatuses(newStatus)
 	if len(from) == 0 {
 		return "", payment.ErrInvalidStatusTransition
@@ -60,6 +65,63 @@ func (r *PaymentRepository) UpdateStatus(ctx context.Context, id uuid.UUID, newS
 		return "", payment.ErrPaymentAlreadyTerminal
 	}
 	return "", payment.ErrInvalidStatusTransition
+}
+
+// MarkPaid moves a payment to paid and, for a production payment with a
+// positive merchant net, writes the merchant's ledger credit in the same
+// transaction: either both happen or neither. Status guard and return value
+// are the same as UpdateStatus(paid). merchant_id for the ledger row comes
+// from the locked payment row, never from the caller.
+func (r *PaymentRepository) MarkPaid(ctx context.Context, id uuid.UUID, paidAt *time.Time, merchantNet int64) (string, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to begin mark-paid transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	from := payment.AllowedSourceStatuses(payment.StatusPaid)
+	args := []interface{}{payment.StatusPaid, paidAt, time.Now(), merchantNet, id}
+	placeholders := make([]string, len(from))
+	for i, s := range from {
+		args = append(args, s)
+		placeholders[i] = fmt.Sprintf("$%d", len(args))
+	}
+	var previous, merchantID, environment string
+	err = tx.QueryRowContext(ctx, `
+		UPDATE payments p SET status = $1, paid_at = $2, updated_at = $3, merchant_net_amount = $4
+		FROM (SELECT id, status FROM payments WHERE id = $5 FOR UPDATE) prev
+		WHERE p.id = prev.id AND p.status IN (`+strings.Join(placeholders, ", ")+`)
+		RETURNING prev.status, p.merchant_id::text, p.environment`, args...).Scan(&previous, &merchantID, &environment)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Release the connection and the row lock before GetByID needs a
+		// second pooled connection (otherwise a burst of losers can exhaust
+		// the pool and deadlock).
+		_ = tx.Rollback()
+		// Same classification as UpdateStatus: terminal vs invalid transition.
+		current, getErr := r.GetByID(ctx, id)
+		if getErr != nil {
+			return "", getErr
+		}
+		if payment.IsTerminalStatus(current.Status) {
+			return "", payment.ErrPaymentAlreadyTerminal
+		}
+		return "", payment.ErrInvalidStatusTransition
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to mark payment paid: %w", err)
+	}
+	if environment == payment.EnvironmentProduction && merchantNet > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO merchant_ledger (id, merchant_id, entry_type, amount, payment_id, note)
+			VALUES ($1, $2, 'payment_credit', $3, $4, '')`,
+			uuid.New(), merchantID, merchantNet, id); err != nil {
+			return "", fmt.Errorf("failed to credit merchant ledger: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("failed to commit mark-paid: %w", err)
+	}
+	return previous, nil
 }
 
 func (r *PaymentRepository) UpdateProviderReference(ctx context.Context, id uuid.UUID, providerReference string) error {
@@ -138,6 +200,13 @@ func (r *PaymentRepository) SumPaidAmount(ctx context.Context) (int64, error) {
 	return total, nil
 }
 
+// paid_amount semantics (StatusBreakdown and DailyPaymentStat): it sums the
+// amount of payments whose status is 'paid'. A fully refunded payment has
+// status 'refunded' and is therefore NOT part of paid_amount (it is counted in
+// the refunded bucket instead); a partially refunded payment stays 'paid' and
+// counts at its full amount. Buckets (paid + pending + failed + expired +
+// cancelled + refunded) add up to total.
+//
 // StatusBreakdown is a one-query summary of payment counts per status (plus
 // total paid amount), optionally scoped by merchant/environment. Exists so
 // callers building a dashboard summary don't have to issue one List+Count
@@ -149,6 +218,7 @@ type StatusBreakdown struct {
 	Failed     int64
 	Expired    int64
 	Cancelled  int64
+	Refunded   int64
 	PaidAmount int64
 }
 
@@ -167,6 +237,7 @@ func (r *PaymentRepository) StatusBreakdownFiltered(
 			COUNT(*) FILTER (WHERE status = 'failed') AS failed,
 			COUNT(*) FILTER (WHERE status = 'expired') AS expired,
 			COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled,
+			COUNT(*) FILTER (WHERE status = 'refunded') AS refunded,
 			COALESCE(SUM(amount) FILTER (WHERE status = 'paid'), 0) AS paid_amount
 		FROM payments
 		WHERE 1=1
@@ -185,7 +256,7 @@ func (r *PaymentRepository) StatusBreakdownFiltered(
 
 	var s StatusBreakdown
 	err := r.db.QueryRowContext(ctx, query, args...).Scan(
-		&s.Total, &s.Paid, &s.Pending, &s.Failed, &s.Expired, &s.Cancelled, &s.PaidAmount,
+		&s.Total, &s.Paid, &s.Pending, &s.Failed, &s.Expired, &s.Cancelled, &s.Refunded, &s.PaidAmount,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status breakdown: %w", err)
@@ -202,6 +273,7 @@ type DailyPaymentStat struct {
 	Failed     int64
 	Expired    int64
 	Cancelled  int64
+	Refunded   int64
 	PaidAmount int64
 }
 
@@ -232,6 +304,7 @@ func (r *PaymentRepository) DailyStatsFiltered(
 			COUNT(*) FILTER (WHERE status = 'failed') AS failed,
 			COUNT(*) FILTER (WHERE status = 'expired') AS expired,
 			COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled,
+			COUNT(*) FILTER (WHERE status = 'refunded') AS refunded,
 			COALESCE(SUM(amount) FILTER (WHERE status = 'paid'), 0) AS paid_amount
 		FROM payments
 		WHERE created_at >= (CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day')
@@ -269,6 +342,7 @@ func (r *PaymentRepository) DailyStatsFiltered(
 			&s.Failed,
 			&s.Expired,
 			&s.Cancelled,
+			&s.Refunded,
 			&s.PaidAmount,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan daily payment stats: %w", err)
@@ -306,7 +380,7 @@ func (r *PaymentRepository) ListAdmin(
 			p.provider_name, p.provider_reference, p.status, p.description,
 			p.customer_name, p.customer_email, p.qris_data, p.callback_url,
 			p.environment, p.expires_at, p.paid_at, p.created_at, p.updated_at,
-			p.fee_amount,
+			p.fee_amount, p.merchant_net_amount,
 			COALESCE(m.business_name, m.name, '') AS merchant_name
 		FROM payments p
 		LEFT JOIN merchants m ON m.id = p.merchant_id
@@ -370,7 +444,7 @@ func (r *PaymentRepository) ListAdmin(
 			&p.ProviderName, &p.ProviderReference, &p.Status, &p.Description,
 			&p.CustomerName, &p.CustomerEmail, &p.QRISData, &p.CallbackURL,
 			&p.Environment, &p.ExpiresAt, &p.PaidAt, &p.CreatedAt, &p.UpdatedAt,
-			&p.FeeAmount,
+			&p.FeeAmount, &p.MerchantNetAmount,
 			&merchantName,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan admin payment: %w", err)

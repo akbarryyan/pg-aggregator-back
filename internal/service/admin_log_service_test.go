@@ -37,8 +37,8 @@ func TestAdminLogService_ListPaymentEvents(t *testing.T) {
 			"provider_name", "provider_reference", "status", "description",
 			"customer_name", "customer_email", "qris_data", "callback_url",
 			"environment", "payment_link_id", "expires_at", "paid_at", "created_at", "updated_at",
-			"fee_amount",
-		}).AddRow(paymentID, "PAY-1", uuid.New(), int64(1000), "IDR", "qris", "cashi", nil, "pending", "d", nil, nil, nil, nil, "production", nil, now, nil, now, now, int64(0)))
+			"fee_amount", "merchant_net_amount",
+		}).AddRow(paymentID, "PAY-1", uuid.New(), int64(1000), "IDR", "qris", "cashi", nil, "pending", "d", nil, nil, nil, nil, "production", nil, now, nil, now, now, int64(0), int64(0)))
 	mock.ExpectQuery(`SELECT[\s\S]*FROM webhook_events WHERE payment_id = \$1`).
 		WithArgs(paymentID, 100).
 		WillReturnRows(sqlmock.NewRows([]string{

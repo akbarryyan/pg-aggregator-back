@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/fee"
 	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
 	"github.com/google/uuid"
 )
@@ -23,6 +24,19 @@ func TestCreatePaymentRequest_Validate(t *testing.T) {
 		req := validRequest()
 		if err := req.Validate(); err != nil {
 			t.Fatalf("expected no error, got %v", err)
+		}
+	})
+
+	t.Run("amount upper bound", func(t *testing.T) {
+		req := validRequest()
+		req.Amount = fee.MaxNominal
+		if err := req.Validate(); err != nil {
+			t.Fatalf("MaxNominal must be accepted, got %v", err)
+		}
+		req = validRequest()
+		req.Amount = fee.MaxNominal + 1
+		if err := req.Validate(); err != ErrInvalidAmount {
+			t.Fatalf("MaxNominal+1 must be rejected with ErrInvalidAmount, got %v", err)
 		}
 	})
 
@@ -150,7 +164,7 @@ func TestNormalizeEnvironment(t *testing.T) {
 }
 
 func TestIsTerminalStatus(t *testing.T) {
-	terminal := []string{StatusPaid, StatusExpired, StatusFailed, StatusCancelled}
+	terminal := []string{StatusPaid, StatusExpired, StatusFailed, StatusCancelled, StatusRefunded}
 	for _, s := range terminal {
 		if !IsTerminalStatus(s) {
 			t.Errorf("expected %q to be terminal", s)
@@ -166,7 +180,7 @@ func TestIsTerminalStatus(t *testing.T) {
 }
 
 func TestIsValidStatus(t *testing.T) {
-	valid := []string{StatusPending, StatusPaid, StatusExpired, StatusFailed, StatusCancelled}
+	valid := []string{StatusPending, StatusPaid, StatusExpired, StatusFailed, StatusCancelled, StatusRefunded}
 	for _, s := range valid {
 		if !IsValidStatus(s) {
 			t.Errorf("expected %q to be valid", s)
@@ -196,6 +210,17 @@ func TestCanTransitionTo(t *testing.T) {
 		{"failed is terminal, cannot move to pending", StatusFailed, StatusPending, false},
 		{"cancelled is terminal, cannot move to paid", StatusCancelled, StatusPaid, false},
 		{"unknown source status rejected", "unknown", StatusPaid, false},
+		{"paid to refunded allowed", StatusPaid, StatusRefunded, true},
+		{"pending to refunded rejected", StatusPending, StatusRefunded, false},
+		{"expired to refunded rejected", StatusExpired, StatusRefunded, false},
+		{"failed to refunded rejected", StatusFailed, StatusRefunded, false},
+		{"cancelled to refunded rejected", StatusCancelled, StatusRefunded, false},
+		{"refunded to refunded rejected", StatusRefunded, StatusRefunded, false},
+		{"refunded to paid rejected", StatusRefunded, StatusPaid, false},
+		{"refunded to pending rejected", StatusRefunded, StatusPending, false},
+		{"refunded to expired rejected", StatusRefunded, StatusExpired, false},
+		{"refunded to failed rejected", StatusRefunded, StatusFailed, false},
+		{"refunded to cancelled rejected", StatusRefunded, StatusCancelled, false},
 	}
 
 	for _, tc := range cases {
@@ -229,6 +254,7 @@ func TestAllowedSourceStatuses(t *testing.T) {
 		StatusExpired:   {StatusPending},
 		StatusFailed:    {StatusPending},
 		StatusCancelled: {StatusPending},
+		StatusRefunded:  {StatusPaid},
 		StatusPending:   nil,
 		"unknown":       nil,
 	}
@@ -335,5 +361,21 @@ func TestCreatePaymentRequest_ValidateCallbackURL(t *testing.T) {
 				t.Errorf("CallbackURL = %q, want nil", *r.CallbackURL)
 			}
 		})
+	}
+}
+
+func TestRefundedIsTerminalAndLeavesNoExit(t *testing.T) {
+	if !IsTerminalStatus(StatusRefunded) {
+		t.Fatal("refunded must be terminal")
+	}
+	for _, to := range []string{StatusPending, StatusPaid, StatusExpired, StatusFailed, StatusCancelled, StatusRefunded} {
+		if CanTransitionTo(StatusRefunded, to) {
+			t.Errorf("refunded -> %s must not be allowed", to)
+		}
+	}
+	for _, from := range []string{StatusPending, StatusExpired, StatusFailed, StatusCancelled, StatusRefunded} {
+		if CanTransitionTo(from, StatusRefunded) {
+			t.Errorf("%s -> refunded must not be allowed", from)
+		}
 	}
 }

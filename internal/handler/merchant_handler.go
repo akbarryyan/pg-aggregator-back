@@ -28,6 +28,8 @@ type MerchantHandler struct {
 	paymentService           *service.PaymentService
 	apiKeyService            *service.MerchantAPIKeyService
 	authService              *service.AuthService
+	balanceService           merchantBalanceAPI
+	payoutService            merchantPayoutAPI
 	frontendURL              string
 }
 
@@ -151,13 +153,14 @@ func (h *MerchantHandler) GetDashboardSummary(w http.ResponseWriter, r *http.Req
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"environment":      env,
-		"total_payments":   stats.Total,
-		"paid_payments":    stats.Paid,
-		"pending_payments": stats.Pending,
-		"failed_payments":  stats.Failed,
-		"expired_payments": stats.Expired,
-		"paid_amount":      stats.PaidAmount,
+		"environment":       env,
+		"total_payments":    stats.Total,
+		"paid_payments":     stats.Paid,
+		"pending_payments":  stats.Pending,
+		"failed_payments":   stats.Failed,
+		"expired_payments":  stats.Expired,
+		"refunded_payments": stats.Refunded,
+		"paid_amount":       stats.PaidAmount,
 	})
 }
 

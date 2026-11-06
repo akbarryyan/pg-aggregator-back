@@ -131,6 +131,27 @@ func (f *fakePaymentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, newSta
 	return previous, nil
 }
 
+// MarkPaid mirrors the real repository: guarded move to paid, net stored.
+func (f *fakePaymentRepo) MarkPaid(ctx context.Context, id uuid.UUID, paidAt *time.Time, merchantNet int64) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.byID[id]
+	if !ok {
+		return "", payment.ErrPaymentNotFound
+	}
+	if !payment.CanTransitionTo(p.Status, payment.StatusPaid) {
+		if payment.IsTerminalStatus(p.Status) {
+			return "", payment.ErrPaymentAlreadyTerminal
+		}
+		return "", payment.ErrInvalidStatusTransition
+	}
+	previous := p.Status
+	p.Status = payment.StatusPaid
+	p.PaidAt = paidAt
+	p.MerchantNetAmount = merchantNet
+	return previous, nil
+}
+
 func (f *fakePaymentRepo) List(ctx context.Context, limit, offset int) ([]*payment.Payment, error) {
 	return nil, nil
 }

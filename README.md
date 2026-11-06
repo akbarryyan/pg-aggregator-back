@@ -69,7 +69,7 @@ ditolak. Path config lain bisa dipakai lewat flag `-config`.
 |---|---|
 | `docker compose up -d` / `down` | start / stop stack |
 | `make migrate` | jalankan migration (container `migrate`) |
-| `make seed` | data demo (ditolak di server) |
+| `make seed` | data demo (ditolak di server). Payment `paid` hasil seed tidak punya kredit ledger: sesudah seed, terapkan ulang backfill migration 021 (lihat DEPLOY.md 4.6 langkah 3, opsi b) agar saldo dev terlihat |
 | `make seed-admin` | admin pertama, hanya jika tabel `admins` kosong |
 | `make release VERSION=x.y.z` | build multi-arch + push ke GHCR |
 
@@ -85,6 +85,7 @@ Deploy ke VPS: [DEPLOY.md](DEPLOY.md).
 | (production) `app.url`, `app.frontend_url` | Di production wajib berawalan `https://` — kalau tidak, server menolak start |
 | `cashi.api_key` / `cashi.secret_key` | Wajib di production; sandbox merchant tidak butuh ini (mock, tanpa HTTP call) |
 | `[db]` | Koneksi PostgreSQL (`host = "postgres"`); `password` sama dengan isi `db_password`; script migrate/seed membacanya lewat `configenv` |
+| `[payout] min_amount` | Wajib (key hilang = server tidak start). Minimum sekali pencairan saldo merchant, rupiah, minimal 1 (produksi: `50000`) |
 | `[rate_limit]` | Batas request per IP (`auth`, `public`, `sensitive`, `api` — keempat sub-section wajib ada) dan `trusted_proxies` — CIDR proxy yang `X-Forwarded-For`-nya dipercaya (`[]` lokal, `["10.89.0.2/32"]` di VPS) |
 
 Error config (key hilang, key tidak dikenal, sintaks) hanya menyebut nama
@@ -157,8 +158,8 @@ Semua di bawah prefix `/api/v1`:
 - `POST /auth/login`, `/auth/register`, `/auth/admin/login` — rate limited (5 req/min)
 - `GET|PUT /auth/me`, `/auth/profile`, `/auth/change-password` (+ varian `/admin/*`) — `change-password` rate limited (10 req/min)
 - `POST /auth/logout`, `/auth/admin/logout` — mencabut semua token sesi akun itu (lihat bawah)
-- `/admin/*` — protected admin panel API (dashboard, payments, merchants, providers, routing, reconciliation, callbacks, logs)
-- `/merchant/*` — protected merchant dashboard API (dashboard, payments, api-keys, payment-links, webhook secret)
+- `/admin/*` — protected admin panel API (dashboard, payments, merchants, providers, routing, reconciliation, callbacks, logs, saldo/payout/refund/adjustment)
+- `/merchant/*` — protected merchant dashboard API (dashboard, payments, api-keys, payment-links, webhook secret, saldo, ledger, rekening payout, pengajuan payout)
 - `GET /public/payments/by-reference/{reference}` — publik, untuk halaman checkout
 - `GET /public/payment-links/{slug}`, `POST /public/payment-links/{slug}/pay` — publik
 - `POST /payments`, `GET /payments/{id}`, `GET /payments/{id}/status` — merchant API key

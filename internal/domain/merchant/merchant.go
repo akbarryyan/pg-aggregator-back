@@ -1,7 +1,10 @@
 package merchant
 
 import (
+	"regexp"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -79,4 +82,31 @@ func ToMerchantResponse(m *Merchant) *MerchantResponse {
 		CreatedAt:    m.CreatedAt,
 		UpdatedAt:    m.UpdatedAt,
 	}
+}
+
+// PayoutAccount is the bank / e-wallet a merchant's payouts are sent to.
+type PayoutAccount struct {
+	BankName      string `json:"bank_name"`
+	AccountNumber string `json:"account_number"`
+	AccountHolder string `json:"account_holder"`
+}
+
+var payoutAccountNumberRe = regexp.MustCompile(`^[0-9]{5,30}$`)
+
+// Normalize trims all fields and validates them, returning a fixed-text
+// error that is safe to show to the client.
+func (a *PayoutAccount) Normalize() error {
+	a.BankName = strings.TrimSpace(a.BankName)
+	a.AccountNumber = strings.TrimSpace(a.AccountNumber)
+	a.AccountHolder = strings.TrimSpace(a.AccountHolder)
+	if n := utf8.RuneCountInString(a.BankName); n < 2 || n > 100 {
+		return ErrPayoutBankInvalid
+	}
+	if !payoutAccountNumberRe.MatchString(a.AccountNumber) {
+		return ErrPayoutAccountNumberInvalid
+	}
+	if n := utf8.RuneCountInString(a.AccountHolder); n < 2 || n > 150 {
+		return ErrPayoutHolderInvalid
+	}
+	return nil
 }

@@ -36,6 +36,8 @@ type fakePaymentRepo struct {
 	// callers (e.g. ReconcilePendingPayments) reuse already-fetched rows
 	// instead of re-fetching each one by ID.
 	getByIDCalls int
+	// markPaidNets records the merchantNet of every successful MarkPaid.
+	markPaidNets []int64
 }
 
 func newFakePaymentRepo() *fakePaymentRepo {
@@ -113,6 +115,28 @@ func (f *fakePaymentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, newSta
 	previous := p.Status
 	p.Status = newStatus
 	p.PaidAt = paidAt
+	return previous, nil
+}
+
+// MarkPaid mirrors the real repository: guarded move to paid, net stored.
+func (f *fakePaymentRepo) MarkPaid(ctx context.Context, id uuid.UUID, paidAt *time.Time, merchantNet int64) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.byID[id]
+	if !ok {
+		return "", payment.ErrPaymentNotFound
+	}
+	if !payment.CanTransitionTo(p.Status, payment.StatusPaid) {
+		if payment.IsTerminalStatus(p.Status) {
+			return "", payment.ErrPaymentAlreadyTerminal
+		}
+		return "", payment.ErrInvalidStatusTransition
+	}
+	previous := p.Status
+	p.Status = payment.StatusPaid
+	p.PaidAt = paidAt
+	p.MerchantNetAmount = merchantNet
+	f.markPaidNets = append(f.markPaidNets, merchantNet)
 	return previous, nil
 }
 

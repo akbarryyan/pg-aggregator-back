@@ -57,6 +57,9 @@ burst               = 6
 [rate_limit.api]
 requests_per_minute = 120
 burst               = 60
+
+[payout]
+min_amount = 50000
 `
 
 func writeConfig(t *testing.T, content string) string {
@@ -103,6 +106,10 @@ func TestLoad_ValidFile(t *testing.T) {
 	wantConn := "host=db.local port=5433 user=pguser password=db-pass-123 dbname=pg_aggregator sslmode=disable statement_timeout=30000 idle_in_transaction_session_timeout=60000"
 	if got := cfg.DB.ConnectionString(); got != wantConn {
 		t.Errorf("ConnectionString() = %q, want %q", got, wantConn)
+	}
+
+	if cfg.Payout.MinAmount != 50000 {
+		t.Errorf("payout.min_amount = %d, want 50000", cfg.Payout.MinAmount)
 	}
 
 	rl := cfg.RateLimit
@@ -205,6 +212,20 @@ func TestLoad_MissingRateLimitAPISection(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
+	}
+}
+
+// A config written before [payout] existed must fail loudly instead of
+// silently allowing payouts of any size.
+func TestLoad_MissingPayoutMinAmount(t *testing.T) {
+	content := replaceOnce(t, validTOML, "\n[payout]\nmin_amount = 50000\n", "")
+
+	_, err := Load(writeConfig(t, content))
+	if err == nil {
+		t.Fatal("expected missing-key error")
+	}
+	if want := "missing keys: payout.min_amount"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not contain %q", err, want)
 	}
 }
 
@@ -373,6 +394,12 @@ func TestLoad_HardenedValidation(t *testing.T) {
 		{"http frontend url in production", func(t *testing.T) string {
 			return replaceOnce(t, productionTOML(t), `frontend_url = "https://app.example.com"`, `frontend_url = "http://app.example.com"`)
 		}, "app.frontend_url must start with https:// in production"},
+		{"zero payout minimum", func(t *testing.T) string {
+			return replaceOnce(t, validTOML, "min_amount = 50000", "min_amount = 0")
+		}, "payout.min_amount must be at least 1"},
+		{"negative payout minimum", func(t *testing.T) string {
+			return replaceOnce(t, validTOML, "min_amount = 50000", "min_amount = -5")
+		}, "payout.min_amount must be at least 1"},
 		{"zero api rate limit", func(t *testing.T) string {
 			return replaceOnce(t, validTOML, "requests_per_minute = 120\nburst               = 60", "requests_per_minute = 0\nburst               = 60")
 		}, "rate_limit.api.requests_per_minute must be greater than 0"},
@@ -430,6 +457,9 @@ func TestLoad_ExampleFileIsValid(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", ".config.example.toml"))
 	if err != nil {
 		t.Fatalf("Load(.config.example.toml): %v", err)
+	}
+	if cfg.Payout.MinAmount != 50000 {
+		t.Errorf("example payout.min_amount = %d, want 50000", cfg.Payout.MinAmount)
 	}
 	if cfg.App.Port != 8080 || cfg.DB.Port != 5432 {
 		t.Errorf("example ports = app %d, db %d; want 8080, 5432", cfg.App.Port, cfg.DB.Port)

@@ -73,6 +73,9 @@ func main() {
 	merchantUserRepo := repository.NewMerchantUserRepository(db)
 	adminRepo := repository.NewAdminRepository(db)
 	idempotencyRepo := repository.NewIdempotencyRepository(db)
+	ledgerRepo := repository.NewLedgerRepository(db)
+	refundRepo := repository.NewRefundRepository(db)
+	payoutRepo := repository.NewPayoutRepository(db)
 	cashiAdapter := cashi.NewCashiAdapter(
 		cfg.Cashi.BaseURL,
 		cfg.Cashi.APIKey,
@@ -104,7 +107,11 @@ func main() {
 	adminProviderService := service.NewAdminProviderService(paymentRepo, merchantProviderConfigRepo, providerRouter)
 	adminDashboardService := service.NewAdminDashboardService(merchantRepo, paymentRepo, webhookEventRepo, adminPaymentService)
 	adminNotificationService := service.NewAdminNotificationService(paymentRepo, webhookEventRepo).
-		WithCallbackRepo(callbackRepo)
+		WithCallbackRepo(callbackRepo).
+		WithPayoutQueue(payoutRepo)
+	payoutService := service.NewPayoutService(payoutRepo, merchantRepo, cfg.Payout.MinAmount)
+	balanceService := service.NewBalanceService(ledgerRepo, merchantRepo, payoutRepo, cfg.Payout.MinAmount)
+	refundService := service.NewRefundService(refundRepo, ledgerRepo, paymentService).WithLister(refundRepo)
 	adminLogService := service.NewAdminLogService(paymentRepo, webhookEventRepo)
 	adminCallbackService := service.NewAdminCallbackService(callbackRepo)
 
@@ -116,10 +123,13 @@ func main() {
 		WithAuthService(authService).
 		WithMerchantAndPaymentServices(adminPaymentService, adminMerchantService).
 		WithProviderService(adminProviderService).
-		WithReportingServices(adminDashboardService, adminNotificationService, adminLogService, adminCallbackService)
+		WithReportingServices(adminDashboardService, adminNotificationService, adminLogService, adminCallbackService).
+		WithPayoutServices(balanceService, payoutService).
+		WithRefundService(refundService)
 	merchantHandler := handler.NewMerchantHandler(paymentService, apiKeyService, authService, cfg.App.FrontendURL).
 		WithMerchantAndPaymentServices(adminPaymentService, adminMerchantService).
-		WithReportingServices(adminDashboardService, adminNotificationService, adminCallbackService)
+		WithReportingServices(adminDashboardService, adminNotificationService, adminCallbackService).
+		WithBalanceServices(balanceService, payoutService)
 	paymentLinkHandler := handler.NewPaymentLinkHandler(paymentLinkService, cfg.App.FrontendURL)
 	authMiddleware := middleware.NewAuthMiddleware(authService)
 	merchantAPIAuth := middleware.NewMerchantAPIAuthMiddleware(apiKeyService)
@@ -343,6 +353,18 @@ func setupRouter(
 	adminAPI.HandleFunc("/logs", adminHandler.ListLogs).Methods("GET")
 	adminAPI.HandleFunc("/logs/export", adminHandler.ExportLogs).Methods("GET")
 	adminAPI.HandleFunc("/logs/{id}", adminHandler.GetLog).Methods("GET")
+	// Merchant balances and payouts (admin side; see the limiter note below).
+	adminAPI.HandleFunc("/balances", adminHandler.ListBalances).Methods("GET")
+	adminAPI.HandleFunc("/merchants/{id}/ledger", adminHandler.ListMerchantLedger).Methods("GET")
+	adminAPI.HandleFunc("/payouts", adminHandler.ListPayouts).Methods("GET")
+	adminAPI.HandleFunc("/payouts/{id}/pay", adminHandler.PayPayout).Methods("POST")
+	adminAPI.HandleFunc("/payouts/{id}/reject", adminHandler.RejectPayout).Methods("POST")
+	// Refunds and adjustments: admin-only and guarded in the DB (row lock,
+	// refundable bound), so they use the group's general api limiter and an
+	// admin working through a batch is not throttled.
+	adminAPI.HandleFunc("/payments/{id}/refund", adminHandler.RefundPayment).Methods("POST")
+	adminAPI.HandleFunc("/payments/{id}/refunds", adminHandler.ListPaymentRefunds).Methods("GET")
+	adminAPI.HandleFunc("/merchants/{id}/adjustments", adminHandler.AdjustMerchantBalance).Methods("POST")
 
 	// Merchant dashboard APIs (JWT session)
 	merchantDash := api.PathPrefix("/merchant").Subrouter()
@@ -365,6 +387,14 @@ func setupRouter(
 	merchantDash.HandleFunc("/business", merchantHandler.UpdateBusiness).Methods("PUT")
 	merchantDash.HandleFunc("/webhook-secret", merchantHandler.GetWebhookSecret).Methods("GET")
 	merchantDash.Handle("/webhook-secret/regenerate", sensitiveRateLimiter.Limit(http.HandlerFunc(merchantHandler.RegenerateWebhookSecret))).Methods("POST")
+	// Balance, ledger and payouts. Everything is scoped to the merchant in the
+	// JWT. Changing the payout account (password) and requesting a payout move
+	// money, so they use the sensitive bucket as well.
+	merchantDash.HandleFunc("/balance", merchantHandler.GetBalance).Methods("GET")
+	merchantDash.HandleFunc("/ledger", merchantHandler.ListLedger).Methods("GET")
+	merchantDash.Handle("/payout-account", sensitiveRateLimiter.Limit(http.HandlerFunc(merchantHandler.UpdatePayoutAccount))).Methods("PUT")
+	merchantDash.Handle("/payouts", sensitiveRateLimiter.Limit(http.HandlerFunc(merchantHandler.RequestPayout))).Methods("POST")
+	merchantDash.HandleFunc("/payouts", merchantHandler.ListPayouts).Methods("GET")
 	merchantDash.HandleFunc("/payment-links", paymentLinkHandler.ListPaymentLinks).Methods("GET")
 	merchantDash.HandleFunc("/payment-links", paymentLinkHandler.CreatePaymentLink).Methods("POST")
 	merchantDash.HandleFunc("/payment-links/{id}", paymentLinkHandler.GetPaymentLink).Methods("GET")

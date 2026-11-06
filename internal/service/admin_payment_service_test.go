@@ -38,7 +38,7 @@ var adminPaymentCols = []string{
 	"provider_name", "provider_reference", "status", "description",
 	"customer_name", "customer_email", "qris_data", "callback_url",
 	"environment", "expires_at", "paid_at", "created_at", "updated_at",
-	"fee_amount", "merchant_name",
+	"fee_amount", "merchant_net_amount", "merchant_name",
 }
 
 func TestAdminPaymentService_ListPayments(t *testing.T) {
@@ -49,7 +49,7 @@ func TestAdminPaymentService_ListPayments(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", uuid.New(), int64(10000), "IDR", "qris",
 			"cashi", nil, "pending", "desc", nil, nil, nil, nil,
-			"production", now, nil, now, now, int64(0), "Acme",
+			"production", now, nil, now, now, int64(0), int64(0), "Acme",
 		))
 	mock.ExpectQuery(`SELECT COUNT\(\*\)`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
@@ -73,7 +73,7 @@ func TestAdminPaymentService_ExportPayments(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", uuid.New(), int64(10000), "IDR", "qris",
 			"cashi", nil, "paid", "desc", nil, nil, nil, nil,
-			"production", now, &now, now, now, int64(0), "Acme",
+			"production", now, &now, now, now, int64(0), int64(0), "Acme",
 		))
 
 	items, err := svc.ExportPayments(context.Background(), "", "", nil, nil, nil, "")
@@ -98,11 +98,11 @@ func TestAdminPaymentService_GetPayment(t *testing.T) {
 			"provider_name", "provider_reference", "status", "description",
 			"customer_name", "customer_email", "qris_data", "callback_url",
 			"environment", "payment_link_id", "expires_at", "paid_at", "created_at", "updated_at",
-			"fee_amount",
+			"fee_amount", "merchant_net_amount",
 		}).AddRow(
 			paymentID, "PAY-1", merchantID, int64(10000), "IDR", "qris",
 			"cashi", nil, "pending", "desc", nil, nil, nil, nil,
-			"production", nil, now, nil, now, now, int64(0),
+			"production", nil, now, nil, now, now, int64(0), int64(0),
 		))
 	mock.ExpectQuery(`SELECT .* FROM merchants\s+WHERE id = \$1`).
 		WithArgs(merchantID).

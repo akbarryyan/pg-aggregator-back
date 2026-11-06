@@ -15,6 +15,11 @@ info:
     oversize body with 413; other JSON endpoints answer 400 `Invalid request
     body`.
 
+    Payment statuses: `pending`, `paid`, `expired`, `failed`, `cancelled`,
+    `refunded`. `refunded` is terminal and is reached only from `paid`, by an
+    admin full refund; amounts are integer rupiah and a payment `amount` is at
+    most 1000000000000.
+
     Session tokens (admin and merchant JWTs) are revoked server-side: logout
     and changing the password invalidate every token issued before that
     moment, and an inactive account's token is rejected with 401.
@@ -39,7 +44,10 @@ tags:
   - name: Admin - Notifications
   - name: Admin - Callbacks
   - name: Admin - Logs
+  - name: Admin - Balances & Payouts
+    description: Merchant balances, payouts, refunds and manual adjustments
   - name: Merchant Dashboard
+  - name: Merchant Balance & Payouts
   - name: Merchant Payment Links
   - name: Public
     description: No authentication — customer-facing checkout
@@ -147,7 +155,7 @@ paths:
       responses:
         '200': { description: Password changed }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { description: Missing/invalid token, or current password incorrect }
+        '401': { description: "Missing/invalid token, or current password incorrect" }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   # ---------------------------------------------------------------- Auth (Admin)
@@ -219,7 +227,7 @@ paths:
       responses:
         '200': { description: Password changed }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { description: Missing/invalid token, or current password incorrect }
+        '401': { description: "Missing/invalid token, or current password incorrect" }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   # ---------------------------------------------------------------- Admin - Dashboard
@@ -266,9 +274,9 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/CreatePaymentRequest' } } }
       responses:
         '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '400': { description: 'Invalid request, including `amount` outside 1..1000000000000', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '502': { description: The payment provider answered with an error or an invalid response. No payment was recorded. }
-        '503': { description: No payment provider is available right now, or the provider could not be reached. No payment was recorded. }
+        '503': { description: "No payment provider is available right now, or the provider could not be reached. No payment was recorded." }
         '504': { description: The payment provider did not answer in time. No payment was recorded. }
 
   /admin/payments/export:
@@ -668,6 +676,164 @@ paths:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminLogDetail' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  # ---------------------------------------------------------------- Admin - Balances, Payouts, Refunds
+  /admin/balances:
+    get:
+      tags: [Admin - Balances & Payouts]
+      summary: Every merchant's balance, highest first
+      description: |
+        Balance = sum of the merchant's ledger (production payments only).
+        `negative=true` keeps only merchants below zero (balances can go
+        negative after a refund or debit adjustment; they are not collected
+        automatically, so this filter is the monitoring view).
+        `limit` defaults to 20 and is capped at 100.
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { name: negative, in: query, schema: { type: boolean }, description: 'Only `true` filters; any other value is ignored.' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedAdminBalances' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/payouts:
+    get:
+      tags: [Admin - Balances & Payouts]
+      summary: List payout requests (queue and history)
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [requested, paid, rejected] }, description: Omit for all statuses. Any other value is a 400. }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedAdminPayouts' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/payouts/{id}/pay:
+    post:
+      tags: [Admin - Balances & Payouts]
+      summary: Mark a payout as paid (after transferring manually)
+      description: |
+        Status `requested` -> `paid`. No ledger row is written (the debit was
+        written when the payout was requested). Payouts are final: a payout
+        that is already `paid` or `rejected` answers 409. Uses the general
+        `api` rate-limit bucket.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PayPayoutRequest' } } }
+      responses:
+        '200': { description: Payout marked paid, content: { application/json: { schema: { $ref: '#/components/schemas/AdminPayout' } } } }
+        '400': { description: "Invalid payout ID or body, or `reference` blank or longer than 200 characters", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/payouts/{id}/reject:
+    post:
+      tags: [Admin - Balances & Payouts]
+      summary: Reject a payout and return the amount to the balance
+      description: |
+        Status `requested` -> `rejected` and a `payout_reversal` ledger row
+        (positive) in the same transaction. Same finality and 409 rule as
+        `pay`. Uses the general `api` rate-limit bucket.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RejectPayoutRequest' } } }
+      responses:
+        '200': { description: Payout rejected, content: { application/json: { schema: { $ref: '#/components/schemas/AdminPayout' } } } }
+        '400': { description: "Invalid payout ID or body, or `reason` blank or longer than 500 characters", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/payments/{id}/refund:
+    post:
+      tags: [Admin - Balances & Payouts]
+      summary: Record a partial or full refund of a paid production payment
+      description: |
+        Admin only; merchants cannot refund. The money to the customer is
+        returned manually outside the platform; this records it. `amount` is
+        the part of the merchant NET (`merchant_net_amount`) to take back
+        from the merchant's balance, at most the net not yet refunded.
+        In one transaction (payment row locked): a `payment_refunds` row, a
+        `refund_debit` ledger row and, when the accumulated refunds reach the
+        net, status `paid` -> `refunded` (terminal) plus a `payment.refunded`
+        merchant callback (full refunds only, queued after commit). A partial
+        refund leaves the payment `paid` and sends no callback. The balance
+        may go negative. Uses the general `api` rate-limit bucket.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RefundRequest' } } }
+      responses:
+        '201': { description: Refund recorded, content: { application/json: { schema: { $ref: '#/components/schemas/RefundResponse' } } } }
+        '400': { description: "Invalid payment ID or body, `amount` <= 0, or `reason` blank or longer than 500 characters", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: 'The payment cannot be refunded: not `paid`, a sandbox payment, already `refunded`, or its net amount is 0', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Refund exceeds the refundable amount, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/payments/{id}/refunds:
+    get:
+      tags: [Admin - Balances & Payouts]
+      summary: A payment's refunds and refundable figures
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      responses:
+        '200': { description: "OK (items newest first; `[]` when none)", content: { application/json: { schema: { $ref: '#/components/schemas/RefundSummary' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/merchants/{id}/adjustments:
+    post:
+      tags: [Admin - Balances & Payouts]
+      summary: Manual credit (positive) or debit (negative) on a merchant's ledger
+      description: |
+        Writes an `adjustment` ledger row. `amount` is non-zero and at most
+        1000000000000 in absolute value; `reason` is required (max 500
+        characters). A debit may push the balance negative. Uses the general
+        `api` rate-limit bucket.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AdjustmentRequest' } } }
+      responses:
+        '201': { description: Adjustment recorded, content: { application/json: { schema: { $ref: '#/components/schemas/AdminLedgerEntry' } } } }
+        '400': { description: "Invalid merchant ID or body, `amount` zero or out of range, or `reason` blank or too long", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Merchant not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/merchants/{id}/ledger:
+    get:
+      tags: [Admin - Balances & Payouts]
+      summary: A merchant's ledger, newest first
+      description: An unknown merchant id answers 200 with an empty list, not 404.
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/PathID' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedAdminLedger' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
   # ---------------------------------------------------------------- Merchant Dashboard
   /merchant/dashboard/summary:
     get:
@@ -693,6 +859,7 @@ paths:
                   pending_payments: { type: integer }
                   failed_payments: { type: integer }
                   expired_payments: { type: integer }
+                  refunded_payments: { type: integer }
                   paid_amount: { type: integer }
 
   /merchant/dashboard/charts:
@@ -759,13 +926,13 @@ paths:
           headers:
             Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
           content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } }
-        '400': { description: Invalid request or malformed Idempotency-Key, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '400': { description: "Invalid request (including `amount` outside 1..1000000000000) or malformed Idempotency-Key", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { description: Merchant account is inactive, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '409': { description: A request with this Idempotency-Key is still being processed (retry shortly), content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '422': { description: Idempotency-Key was already used with a different request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '502': { description: The payment provider answered with an error or an invalid response. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
-        '503': { description: No payment provider is available right now, or the provider could not be reached. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
+        '503': { description: "No payment provider is available right now, or the provider could not be reached. No payment was recorded. Retrying with the same Idempotency-Key is safe." }
         '504': { description: The payment provider did not answer in time. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
 
   /merchant/payments/export:
@@ -881,6 +1048,95 @@ paths:
         '401': { description: Wrong password (message Invalid password) or missing/invalid token, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
+  # ---------------------------------------------------------------- Merchant Balance & Payouts
+  /merchant/balance:
+    get:
+      tags: [Merchant Balance & Payouts]
+      summary: Balance card for the authenticated merchant
+      description: |
+        Production money only (sandbox payments never enter the balance).
+        `balance` is the sum of the whole ledger, adjustments included; the
+        three totals exclude adjustments. `can_request` is true when a payout
+        could be requested now (payout account set, no open request, balance
+        at least `min_payout_amount`).
+      security: [{ merchantBearer: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantBalance' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /merchant/ledger:
+    get:
+      tags: [Merchant Balance & Payouts]
+      summary: Ledger entries of the authenticated merchant, newest first
+      description: Admin identifiers (`created_by`) and `merchant_id` are not included.
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200': { description: "OK (`limit` defaults to 20, capped at 100)", content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedMerchantLedger' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /merchant/payout-account:
+    put:
+      tags: [Merchant Balance & Payouts]
+      summary: Set or change the payout destination (requires the account password)
+      description: |
+        Re-authenticates with the dashboard password like webhook-secret
+        regeneration. A wrong password is a plain 401 `Invalid password`;
+        clients must not treat it as an expired session. Payouts keep a
+        snapshot of the account at request time, so changing it does not
+        affect an already open request. Uses the sensitive rate-limit bucket.
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdatePayoutAccountRequest' } } }
+      responses:
+        '200': { description: Saved (normalised values), content: { application/json: { schema: { $ref: '#/components/schemas/PayoutAccount' } } } }
+        '400': { description: 'Invalid body, password missing, or bank name / account number / holder invalid', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: 'Missing/invalid token, or `Invalid password`', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Merchant not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /merchant/payouts:
+    get:
+      tags: [Merchant Balance & Payouts]
+      summary: Payout requests of the authenticated merchant
+      description: Admin identifiers (`requested_by`, `processed_by`) and `merchant_id` are not included.
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+      responses:
+        '200': { description: "OK (`limit` defaults to 20, capped at 100)", content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedMerchantPayouts' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    post:
+      tags: [Merchant Balance & Payouts]
+      summary: Request a payout
+      description: |
+        The amount is debited from the balance immediately (a `payout_debit`
+        ledger row), so the available balance always accounts for the open
+        request; a rejection returns it. At most one request per merchant is
+        open at a time, which is also what makes a double click safe (no
+        `Idempotency-Key` is used). The minimum is the server's
+        `payout.min_amount` (50000 in production). Uses the sensitive
+        rate-limit bucket.
+      security: [{ merchantBearer: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RequestPayoutRequest' } } }
+      responses:
+        '201': { description: Requested, content: { application/json: { schema: { $ref: '#/components/schemas/MerchantPayout' } } } }
+        '400': { description: Invalid body or amount below the minimum payout, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Merchant not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: A payout request is already waiting to be processed, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: 'Insufficient balance, or no payout account set', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
   # ---------------------------------------------------------------- Merchant Payment Links
   /merchant/payment-links:
     get:
@@ -945,6 +1201,7 @@ paths:
     get:
       tags: [Merchant Payment Links]
       summary: List payments spawned by this link
+      description: Items are the raw payment records and also carry `merchant_net_amount` (what the merchant keeps once paid; stored for every paid payment, but only production payments are credited to the ledger; 0 for payments that are not paid). No other payment response exposes it to merchants.
       security: [{ merchantBearer: [] }]
       parameters:
         - { $ref: '#/components/parameters/PathID' }
@@ -965,7 +1222,7 @@ paths:
         (`amount` + `fee_amount`, what the customer pays). The checkout page shows `total_amount`.
       parameters: [{ name: reference, in: path, required: true, schema: { type: string } }]
       responses:
-        '200': { description: OK (fields include id, reference, amount, fee_amount, total_amount, currency, status) }
+        '200': { description: "OK (fields include id, reference, amount, fee_amount, total_amount, currency, status)" }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
@@ -995,11 +1252,11 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/InitiateCheckoutRequest' } } }
       responses:
         '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '400': { description: 'Invalid request, including an open-link `amount` outside 1..1000000000000', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '502': { description: The payment provider answered with an error or an invalid response. No payment was recorded. }
-        '503': { description: No payment provider is available right now, or the provider could not be reached. No payment was recorded. }
+        '503': { description: "No payment provider is available right now, or the provider could not be reached. No payment was recorded." }
         '504': { description: The payment provider did not answer in time. No payment was recorded. }
 
   # ---------------------------------------------------------------- Merchant API (API key)
@@ -1032,15 +1289,27 @@ paths:
           headers:
             Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
           content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } }
-        '400': { description: Invalid request or malformed Idempotency-Key, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '400': { description: "Invalid request (including `amount` outside 1..1000000000000) or malformed Idempotency-Key", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '401': { description: Missing/invalid/revoked API key }
         '403': { description: Merchant inactive (rejected at authentication and again on creation) }
         '409': { description: A request with this Idempotency-Key is still being processed (retry shortly), content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '422': { description: Idempotency-Key was already used with a different request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '502': { description: The payment provider answered with an error or an invalid response. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
-        '503': { description: No payment provider is available right now, or the provider could not be reached. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
+        '503': { description: "No payment provider is available right now, or the provider could not be reached. No payment was recorded. Retrying with the same Idempotency-Key is safe." }
         '504': { description: The payment provider did not answer in time. No payment was recorded. Retrying with the same Idempotency-Key is safe. }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+      callbacks:
+        paymentStatusChanged:
+          '{$request.body#/callback_url}':
+            post:
+              summary: Payment status change notification (also sent to the merchant `webhook_url`)
+              description: |
+                Events: `payment.paid`, `payment.expired`, `payment.failed`,
+                `payment.cancelled` and `payment.refunded` (full refunds only).
+              requestBody:
+                content: { application/json: { schema: { $ref: '#/components/schemas/PaymentCallbackPayload' } } }
+              responses:
+                '2XX': { description: Any 2xx marks the delivery successful; other results are retried (up to 5 attempts) }
 
   /payments/{id}:
     get:
@@ -1083,7 +1352,7 @@ paths:
       requestBody:
         content: { application/json: { schema: { type: object } } }
       responses:
-        '200': { description: Processed, or acknowledged without a status change (ignored) }
+        '200': { description: "Processed, or acknowledged without a status change (ignored)" }
         '400': { description: Invalid payload / signature validation failed / unregistered provider / unknown order / provider does not own the payment }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
@@ -1176,6 +1445,9 @@ components:
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     NotFound:
       description: Not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Conflict:
+      description: Conflict (e.g. the payout was already processed)
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     PayloadTooLarge:
       description: Request body exceeds the 1 MiB limit
@@ -1271,7 +1543,7 @@ components:
       required: [amount, payment_method, description]
       properties:
         merchant_id: { type: string, format: uuid, description: Forced from context on merchant-authenticated routes }
-        amount: { type: integer, minimum: 1, description: 'Merchant nominal. If the merchant has fee_bearer customer, the customer pays amount + fee_amount (see total_amount in the response).' }
+        amount: { type: integer, minimum: 1, maximum: 1000000000000, description: 'Merchant nominal; values outside 1..1000000000000 are rejected with 400. If the merchant has fee_bearer customer, the customer pays amount + fee_amount (see total_amount in the response).' }
         currency: { type: string, default: IDR }
         payment_method: { type: string, enum: [qris] }
         description: { type: string }
@@ -1311,7 +1583,7 @@ components:
         payment_method: { type: string }
         provider_name: { type: string }
         provider_reference: { type: string, nullable: true }
-        status: { type: string, enum: [pending, paid, expired, failed, cancelled] }
+        status: { type: string, enum: [pending, paid, expired, failed, cancelled, refunded] }
         description: { type: string }
         customer_name: { type: string, nullable: true }
         customer_email: { type: string, nullable: true }
@@ -1328,7 +1600,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         reference: { type: string }
-        status: { type: string }
+        status: { type: string, enum: [pending, paid, expired, failed, cancelled, refunded] }
         amount: { type: integer, description: Merchant nominal }
         fee_amount: { type: integer, description: 'Provider fee added on top of `amount`; 0 unless the merchant has `fee_bearer: customer`.' }
         total_amount: { type: integer, description: 'What the customer pays: `amount` + `fee_amount`. `amount` is always the merchant nominal.' }
@@ -1350,7 +1622,7 @@ components:
         payment_method: { type: string }
         provider_name: { type: string }
         provider_reference: { type: string, nullable: true }
-        status: { type: string }
+        status: { type: string, enum: [pending, paid, expired, failed, cancelled, refunded] }
         description: { type: string }
         customer_name: { type: string, nullable: true }
         customer_email: { type: string, nullable: true }
@@ -1599,6 +1871,7 @@ components:
         paid_payments: { type: integer }
         expired_payments: { type: integer }
         failed_payments: { type: integer }
+        refunded_payments: { type: integer }
         total_merchants: { type: integer }
         paid_amount: { type: integer }
         webhook_events: { type: integer }
@@ -1613,11 +1886,12 @@ components:
         failed: { type: integer }
         expired: { type: integer }
         cancelled: { type: integer }
-        paid_amount: { type: integer }
+        refunded: { type: integer }
+        paid_amount: { type: integer, description: 'Fully refunded payments (`refunded`) are not counted; a partially refunded payment stays `paid` at its full amount.' }
     DashboardStatusPoint:
       type: object
       properties:
-        status: { type: string }
+        status: { type: string, description: 'pending, paid, expired, failed, cancelled or refunded' }
         count: { type: integer }
     DashboardCharts:
       type: object
@@ -1631,7 +1905,7 @@ components:
       type: object
       properties:
         id: { type: string }
-        kind: { type: string, enum: [webhook_error, webhook_pending, payment_failed, payment_expired, info] }
+        kind: { type: string, enum: [webhook_error, webhook_pending, payment_failed, payment_expired, payout_requested, info], description: '`payout_requested` appears in the admin feed only, with `href` /admin/payouts, while payout requests are waiting.' }
         title: { type: string }
         body: { type: string }
         created_at: { type: string, format: date-time }
@@ -1709,6 +1983,231 @@ components:
         limit: { type: integer }
         offset: { type: integer }
 
+    # ---- Balance, payouts, refunds ----
+    PayoutAccount:
+      type: object
+      properties:
+        bank_name: { type: string }
+        account_number: { type: string }
+        account_holder: { type: string }
+    UpdatePayoutAccountRequest:
+      type: object
+      required: [password, bank_name, account_number, account_holder]
+      properties:
+        password: { type: string, description: The dashboard account password }
+        bank_name: { type: string }
+        account_number: { type: string, description: 5-30 digits }
+        account_holder: { type: string }
+    RequestPayoutRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount: { type: integer, description: 'Rupiah; at least the minimum payout and at most the balance.' }
+    MerchantBalance:
+      type: object
+      properties:
+        balance: { type: integer, description: 'Sum of the whole ledger (adjustments included); may be negative.' }
+        total_credited: { type: integer }
+        total_paid_out: { type: integer, description: "Payouts that are requested or paid, net of reversals (rejected payouts)." }
+        total_refunded: { type: integer }
+        min_payout_amount: { type: integer }
+        payout_account:
+          nullable: true
+          allOf: [{ $ref: '#/components/schemas/PayoutAccount' }]
+        can_request: { type: boolean }
+    LedgerEntryType:
+      type: string
+      enum: [payment_credit, refund_debit, payout_debit, payout_reversal, adjustment]
+      description: Credits are positive, debits negative; `adjustment` can be either.
+    MerchantLedgerEntry:
+      type: object
+      description: Merchant view. No admin identifiers and no `merchant_id`.
+      properties:
+        id: { type: string, format: uuid }
+        entry_type: { $ref: '#/components/schemas/LedgerEntryType' }
+        amount: { type: integer, description: Signed rupiah }
+        payment_id: { type: string, format: uuid }
+        payout_id: { type: string, format: uuid }
+        refund_id: { type: string, format: uuid }
+        note: { type: string }
+        created_at: { type: string, format: date-time }
+    AdminLedgerEntry:
+      type: object
+      description: Admin view; adds `merchant_id` and `created_by` (admin or user id; absent for system rows such as backfill and payment credits).
+      properties:
+        id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        entry_type: { $ref: '#/components/schemas/LedgerEntryType' }
+        amount: { type: integer, description: Signed rupiah }
+        payment_id: { type: string, format: uuid }
+        payout_id: { type: string, format: uuid }
+        refund_id: { type: string, format: uuid }
+        note: { type: string }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    PayoutStatus:
+      type: string
+      enum: [requested, paid, rejected]
+    MerchantPayout:
+      type: object
+      description: Merchant view. No `merchant_id`, `requested_by` or `processed_by`. The bank fields are a snapshot taken at request time.
+      properties:
+        id: { type: string, format: uuid }
+        amount: { type: integer }
+        status: { $ref: '#/components/schemas/PayoutStatus' }
+        bank_name: { type: string }
+        account_number: { type: string }
+        account_holder: { type: string }
+        requested_at: { type: string, format: date-time }
+        processed_at: { type: string, format: date-time }
+        reference: { type: string, description: "Transfer reference; present when `paid`" }
+        reject_reason: { type: string, description: "Present when `rejected`" }
+    AdminPayout:
+      type: object
+      description: Admin view; adds ids and, in listings, `merchant_name`.
+      properties:
+        id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        merchant_name: { type: string, description: Only in GET /admin/payouts }
+        amount: { type: integer }
+        status: { $ref: '#/components/schemas/PayoutStatus' }
+        bank_name: { type: string }
+        account_number: { type: string }
+        account_holder: { type: string }
+        requested_by: { type: string, format: uuid }
+        requested_at: { type: string, format: date-time }
+        processed_by: { type: string, format: uuid }
+        processed_at: { type: string, format: date-time }
+        reference: { type: string }
+        reject_reason: { type: string }
+    PayPayoutRequest:
+      type: object
+      required: [reference]
+      properties:
+        reference: { type: string, maxLength: 200, description: Bank transfer reference }
+    RejectPayoutRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, maxLength: 500 }
+    AdminMerchantBalance:
+      type: object
+      properties:
+        merchant_id: { type: string, format: uuid }
+        merchant_name: { type: string }
+        balance: { type: integer }
+        open_payout_id: { type: string, format: uuid }
+        open_payout_amount: { type: integer, description: 0 when there is no open request }
+    RefundRequest:
+      type: object
+      required: [amount, reason]
+      properties:
+        amount: { type: integer, minimum: 1, description: 'Part of the merchant net to take back; at most the net not yet refunded.' }
+        reason: { type: string, maxLength: 500 }
+    AdjustmentRequest:
+      type: object
+      required: [amount, reason]
+      properties:
+        amount: { type: integer, description: 'Non-zero signed rupiah, absolute value at most 1000000000000.' }
+        reason: { type: string, maxLength: 500 }
+    Refund:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        payment_id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        amount: { type: integer }
+        reason: { type: string }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    RefundResponse:
+      type: object
+      properties:
+        refund: { $ref: '#/components/schemas/Refund' }
+        payment_status: { type: string, enum: [paid, refunded], description: '`refunded` when this refund completed the net.' }
+        remaining_refundable: { type: integer }
+    RefundItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        amount: { type: integer }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+    RefundSummary:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/RefundItem' } }
+        merchant_net_amount: { type: integer, description: What the merchant kept from this payment; the refund ceiling. }
+        refunded_amount: { type: integer }
+        remaining_refundable: { type: integer }
+        refundable: { type: boolean }
+    PaginatedAdminBalances:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AdminMerchantBalance' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    PaginatedAdminPayouts:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AdminPayout' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    PaginatedAdminLedger:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AdminLedgerEntry' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    PaginatedMerchantLedger:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/MerchantLedgerEntry' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    PaginatedMerchantPayouts:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/MerchantPayout' } }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    # ---- Merchant callback payload ----
+    PaymentCallbackPayload:
+      type: object
+      description: |
+        Body POSTed to the payment's `callback_url` (or the merchant
+        `webhook_url`). Headers: `X-PG-Event` (same value as `event`) and
+        `X-PG-Signature` (HMAC-SHA256 of the raw body with the merchant
+        webhook secret). Delivery is at-least-once; de-duplicate on
+        (`payment_id`, `event`).
+
+        `payment.refunded` is sent only when a payment becomes fully refunded
+        (never for a partial refund). Its payload carries the ORIGINAL payment
+        amounts (`amount`, `fee_amount`, `total_amount`) and `status:
+        refunded`; refund details (refunded amount, reason) are not included.
+        A refunded payment never changes status again.
+      properties:
+        event: { type: string, enum: [payment.paid, payment.expired, payment.failed, payment.cancelled, payment.refunded] }
+        payment_id: { type: string, format: uuid }
+        reference: { type: string }
+        status: { type: string, enum: [paid, expired, failed, cancelled, refunded] }
+        amount: { type: integer, description: Merchant nominal }
+        fee_amount: { type: integer }
+        total_amount: { type: integer }
+        currency: { type: string }
+        merchant_id: { type: string, format: uuid }
+        provider: { type: string }
+        provider_reference: { type: string }
+        paid_at: { type: string, format: date-time, description: Kept on `payment.refunded` }
+        occurred_at: { type: string, format: date-time }
+        late_payment: { type: boolean }
+
     # ---- Payment Links ----
     CreatePaymentLinkRequest:
       type: object
@@ -1738,7 +2237,7 @@ components:
       type: object
       description: amount is only honored for open-amount links.
       properties:
-        amount: { type: integer }
+        amount: { type: integer, maximum: 1000000000000, description: 'Open-amount links only; at most 1000000000000 (400 otherwise).' }
         customer_name: { type: string, nullable: true }
         customer_email: { type: string, nullable: true }
     PaymentLinkResponse:

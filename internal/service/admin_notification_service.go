@@ -23,6 +23,13 @@ type AdminNotificationService struct {
 	paymentRepo      *repository.PaymentRepository
 	webhookEventRepo *repository.WebhookEventRepository
 	callbackRepo     *repository.MerchantCallbackRepository
+	payoutQueue      payoutQueue
+}
+
+// payoutQueue reports how many payouts wait for an admin and when the latest
+// was requested (nil when none).
+type payoutQueue interface {
+	PendingSummary(ctx context.Context) (int64, *time.Time, error)
 }
 
 func NewAdminNotificationService(
@@ -37,6 +44,12 @@ func NewAdminNotificationService(
 
 func (s *AdminNotificationService) WithCallbackRepo(repo *repository.MerchantCallbackRepository) *AdminNotificationService {
 	s.callbackRepo = repo
+	return s
+}
+
+// WithPayoutQueue adds the "payout requested" item to the admin feed.
+func (s *AdminNotificationService) WithPayoutQueue(q payoutQueue) *AdminNotificationService {
+	s.payoutQueue = q
 	return s
 }
 
@@ -103,12 +116,21 @@ func (s *AdminNotificationService) ListNotifications(ctx context.Context, limit 
 		add(notificationFromPayment(row.Payment, row.MerchantName, "payment_expired"))
 	}
 
-	// Newest first
-	sortNotificationsByCreatedAtDesc(items)
-
-	if len(items) > limit {
-		items = items[:limit]
+	// The open-payout item is added after truncation: an old waiting payout
+	// must never fall off a busy feed (it needs an admin action).
+	var payoutItem *AdminNotification
+	if s.payoutQueue != nil {
+		n, latest, err := s.payoutQueue.PendingSummary(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 && latest != nil {
+			pn := payoutRequestedNotification(n, *latest)
+			payoutItem = &pn
+		}
 	}
+
+	items = capFeed(items, payoutItem, limit)
 
 	attention := 0
 	for _, n := range items {
@@ -257,6 +279,24 @@ func notificationFromLog(e *provider.WebhookEvent) (AdminNotification, bool) {
 	return AdminNotification{}, false
 }
 
+// payoutRequestedNotification is one item for all open payouts, so the badge
+// counts "needs attention" once while the body carries the number waiting.
+func payoutRequestedNotification(count int64, latest time.Time) AdminNotification {
+	body := "1 payout request is waiting to be processed"
+	if count > 1 {
+		body = fmt.Sprintf("%d payout requests are waiting to be processed", count)
+	}
+	return AdminNotification{
+		ID:        "payout-requested",
+		Kind:      "payout_requested",
+		Title:     "Payout requested",
+		Body:      body,
+		CreatedAt: latest.UTC().Format(time.RFC3339),
+		Href:      "/admin/payouts",
+		Attention: true,
+	}
+}
+
 func notificationFromPayment(p *payment.Payment, merchantName, kind string) AdminNotification {
 	title := "Payment expired"
 	if kind == "payment_failed" {
@@ -299,6 +339,25 @@ func sortNotificationsByCreatedAtDesc(items []AdminNotification) {
 	sort.Slice(items, func(i, j int) bool {
 		ti, _ := time.Parse(time.RFC3339, items[i].CreatedAt)
 		tj, _ := time.Parse(time.RFC3339, items[j].CreatedAt)
-		return tj.After(ti)
+		return ti.After(tj)
 	})
+}
+
+// capFeed sorts items newest first and caps them at limit. pinned (may be nil)
+// always survives the cap: it takes the last slot when the feed is full, then
+// the order is restored.
+func capFeed(items []AdminNotification, pinned *AdminNotification, limit int) []AdminNotification {
+	sortNotificationsByCreatedAtDesc(items)
+	if pinned == nil {
+		if len(items) > limit {
+			items = items[:limit]
+		}
+		return items
+	}
+	if len(items) >= limit {
+		items = items[:limit-1]
+	}
+	items = append(items, *pinned)
+	sortNotificationsByCreatedAtDesc(items)
+	return items
 }

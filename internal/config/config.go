@@ -19,6 +19,13 @@ type Config struct {
 	Cashi     CashiConfig     `toml:"cashi"`
 	Security  SecurityConfig  `toml:"security"`
 	RateLimit RateLimitConfig `toml:"rate_limit"`
+	Payout    PayoutConfig    `toml:"payout"`
+}
+
+// PayoutConfig holds merchant payout settings.
+type PayoutConfig struct {
+	// MinAmount is the smallest payout a merchant may request, in rupiah.
+	MinAmount int64 `toml:"min_amount"`
 }
 
 type AppConfig struct {
@@ -265,6 +272,10 @@ func (c *Config) Validate() error {
 		if r.rule.Burst < 1 {
 			return fmt.Errorf("rate_limit.%s.burst must be at least 1", r.name)
 		}
+	}
+
+	if c.Payout.MinAmount < 1 {
+		return errors.New("payout.min_amount must be at least 1")
 	}
 
 	if c.App.Environment == "production" {

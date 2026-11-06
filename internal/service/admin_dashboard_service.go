@@ -36,14 +36,15 @@ func NewAdminDashboardService(
 }
 
 type DashboardSummary struct {
-	TotalPayments   int64 `json:"total_payments"`
-	PendingPayments int64 `json:"pending_payments"`
-	PaidPayments    int64 `json:"paid_payments"`
-	ExpiredPayments int64 `json:"expired_payments"`
-	FailedPayments  int64 `json:"failed_payments"`
-	TotalMerchants  int64 `json:"total_merchants"`
-	PaidAmount      int64 `json:"paid_amount"`
-	WebhookEvents   int64 `json:"webhook_events"`
+	TotalPayments    int64 `json:"total_payments"`
+	PendingPayments  int64 `json:"pending_payments"`
+	PaidPayments     int64 `json:"paid_payments"`
+	ExpiredPayments  int64 `json:"expired_payments"`
+	FailedPayments   int64 `json:"failed_payments"`
+	RefundedPayments int64 `json:"refunded_payments"`
+	TotalMerchants   int64 `json:"total_merchants"`
+	PaidAmount       int64 `json:"paid_amount"`
+	WebhookEvents    int64 `json:"webhook_events"`
 }
 
 type DashboardDailyPoint struct {
@@ -55,6 +56,7 @@ type DashboardDailyPoint struct {
 	Failed     int64  `json:"failed"`
 	Expired    int64  `json:"expired"`
 	Cancelled  int64  `json:"cancelled"`
+	Refunded   int64  `json:"refunded"`
 	PaidAmount int64  `json:"paid_amount"`
 }
 
@@ -90,6 +92,10 @@ func (s *AdminDashboardService) GetDashboardSummary(ctx context.Context) (*Dashb
 	if err != nil {
 		return nil, err
 	}
+	refunded, err := s.paymentRepo.CountAllByStatus(ctx, payment.StatusRefunded)
+	if err != nil {
+		return nil, err
+	}
 	merchants, err := s.merchantRepo.Count(ctx)
 	if err != nil {
 		return nil, err
@@ -104,14 +110,15 @@ func (s *AdminDashboardService) GetDashboardSummary(ctx context.Context) (*Dashb
 	}
 
 	return &DashboardSummary{
-		TotalPayments:   total,
-		PendingPayments: pending,
-		PaidPayments:    paid,
-		ExpiredPayments: expired,
-		FailedPayments:  failed,
-		TotalMerchants:  merchants,
-		PaidAmount:      paidAmount,
-		WebhookEvents:   webhooks,
+		TotalPayments:    total,
+		PendingPayments:  pending,
+		PaidPayments:     paid,
+		ExpiredPayments:  expired,
+		FailedPayments:   failed,
+		RefundedPayments: refunded,
+		TotalMerchants:   merchants,
+		PaidAmount:       paidAmount,
+		WebhookEvents:    webhooks,
 	}, nil
 }
 
@@ -143,6 +150,7 @@ func (s *AdminDashboardService) MerchantDailyStats(
 		{Status: "pending", Count: stats.Pending},
 		{Status: "failed", Count: stats.Failed},
 		{Status: "expired", Count: stats.Expired},
+		{Status: "refunded", Count: stats.Refunded},
 	}
 	return fillDailyCharts(raw, days, breakdown), nil
 }
@@ -170,6 +178,7 @@ func (s *AdminDashboardService) GetDashboardCharts(ctx context.Context, days int
 		{Status: "pending", Count: summary.PendingPayments},
 		{Status: "failed", Count: summary.FailedPayments},
 		{Status: "expired", Count: summary.ExpiredPayments},
+		{Status: "refunded", Count: summary.RefundedPayments},
 	}
 
 	return fillDailyCharts(raw, days, statusBreakdown), nil
@@ -206,6 +215,7 @@ func fillDailyCharts(
 			point.Failed = row.Failed
 			point.Expired = row.Expired
 			point.Cancelled = row.Cancelled
+			point.Refunded = row.Refunded
 			point.PaidAmount = row.PaidAmount
 		}
 		daily = append(daily, point)

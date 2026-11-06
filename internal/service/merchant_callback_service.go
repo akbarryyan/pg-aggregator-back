@@ -577,6 +577,8 @@ func eventTypeForStatus(status string) string {
 		return "payment.failed"
 	case payment.StatusCancelled:
 		return "payment.cancelled"
+	case payment.StatusRefunded:
+		return "payment.refunded"
 	default:
 		return "payment." + status
 	}

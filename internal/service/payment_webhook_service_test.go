@@ -545,7 +545,7 @@ func TestProcessWebhook_LostRaceToConcurrentSettlement(t *testing.T) {
 		statusResp: &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid, Amount: ptrInt64(15000)},
 		onStatus: func() {
 			now := time.Now()
-			if _, err := paymentRepo.UpdateStatus(context.Background(), seeded.ID, payment.StatusPaid, &now); err != nil {
+			if _, err := paymentRepo.MarkPaid(context.Background(), seeded.ID, &now, 0); err != nil {
 				t.Errorf("simulated winner failed: %v", err)
 			}
 		},
@@ -738,5 +738,26 @@ func TestProcessWebhook_ProviderDoesNotOwnPayment(t *testing.T) {
 	}
 	if e := lastEvent(webhookRepo); e == nil || e.Status != "rejected" || e.PaymentID == nil || *e.PaymentID != seeded.ID {
 		t.Errorf("expected rejected event linked to the payment, got %+v", e)
+	}
+}
+
+func TestProcessWebhook_RefundedPaymentStaysRefunded(t *testing.T) {
+	svc, paymentRepo, _, router := newWebhookTestService()
+	p := seedPayment(t, paymentRepo, payment.StatusRefunded, "REF-REFUNDED")
+	router.RegisterProvider(&fakeProvider{name: "cashi", parseResp: &domainProvider.ProviderWebhookPayload{
+		ProviderReference: "REF-REFUNDED",
+		Status:            "paid",
+	}})
+
+	err := svc.ProcessWebhook(context.Background(), "cashi", []byte(`{}`), "sig")
+	if !errors.Is(err, payment.ErrPaymentAlreadyTerminal) {
+		t.Fatalf("expected ErrPaymentAlreadyTerminal, got %v", err)
+	}
+	got, _ := paymentRepo.GetByID(context.Background(), p.ID)
+	if got.Status != payment.StatusRefunded {
+		t.Fatalf("status = %q", got.Status)
+	}
+	if len(paymentRepo.markPaidNets) != 0 {
+		t.Fatalf("MarkPaid must not be called, got %v", paymentRepo.markPaidNets)
 	}
 }

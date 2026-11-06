@@ -31,6 +31,9 @@ type AdminHandler struct {
 	paymentService           *service.PaymentService
 	apiKeyService            *service.MerchantAPIKeyService
 	authService              *service.AuthService
+	balanceService           adminBalanceAPI
+	payoutService            adminPayoutAPI
+	refundService            adminRefundAPI
 	frontendURL              string
 }
 

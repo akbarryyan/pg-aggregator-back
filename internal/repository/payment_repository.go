@@ -23,7 +23,7 @@ const paymentSelectCols = `
 			provider_name, provider_reference, status, description,
 			customer_name, customer_email, qris_data, callback_url,
 			environment, payment_link_id, expires_at, paid_at, created_at, updated_at,
-			fee_amount
+			fee_amount, merchant_net_amount
 `
 
 func scanPayment(scanner interface {
@@ -34,7 +34,7 @@ func scanPayment(scanner interface {
 		&p.ProviderName, &p.ProviderReference, &p.Status, &p.Description,
 		&p.CustomerName, &p.CustomerEmail, &p.QRISData, &p.CallbackURL,
 		&p.Environment, &p.PaymentLinkID, &p.ExpiresAt, &p.PaidAt, &p.CreatedAt, &p.UpdatedAt,
-		&p.FeeAmount,
+		&p.FeeAmount, &p.MerchantNetAmount,
 	)
 }
 

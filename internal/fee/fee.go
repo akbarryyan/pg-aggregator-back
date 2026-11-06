@@ -8,6 +8,11 @@ import "errors"
 const (
 	bpsDenominator = 10000
 
+	// ProviderBasisPoints is the provider (Cashi) percentage fee, 0.7%. The
+	// Cashi and sandbox adapters and the merchant-balance backfill (migration
+	// 021) all use this one rate.
+	ProviderBasisPoints int64 = 70
+
 	// MaxNominal is the largest accepted nominal. It guarantees that
 	// nominal*10000 and the resulting total stay inside int64 for every
 	// allowed bps (the worst case, bps 9999, yields a total of 1e16).
@@ -45,4 +50,19 @@ func QuoteTotalBasisPoints(nominal, bps int64) (total, feeAmount int64, err erro
 	denom := bpsDenominator - bps
 	g := (nominal*bpsDenominator + denom - 1) / denom
 	return g, g - nominal, nil
+}
+
+// MerchantNetBasisPoints returns what a merchant who bears the provider fee
+// keeps from a payment of nominal: nominal - ceil(nominal*bps/10000), and the
+// fee itself. The fee rounds UP (the conservative direction, same assumption
+// as QuoteTotalBasisPoints). nominal*bps <= 1e12*9999 fits in int64.
+func MerchantNetBasisPoints(nominal, bps int64) (net, feeAmount int64, err error) {
+	if nominal < 1 || nominal > MaxNominal {
+		return 0, 0, ErrInvalidNominal
+	}
+	if bps < 0 || bps >= bpsDenominator {
+		return 0, 0, ErrInvalidRate
+	}
+	feeAmount = (nominal*bps + bpsDenominator - 1) / bpsDenominator
+	return nominal - feeAmount, feeAmount, nil
 }

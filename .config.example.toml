@@ -54,3 +54,6 @@ burst               = 5
 [rate_limit.api]        # JWT-authenticated dashboard/admin routes + API-key payment creation
 requests_per_minute = 120
 burst               = 60
+
+[payout]
+min_amount = 50000                       # smallest payout a merchant may request, in rupiah; must be >= 1

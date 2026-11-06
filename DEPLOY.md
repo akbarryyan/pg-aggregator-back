@@ -178,6 +178,9 @@ burst               = 5
 [rate_limit.api]
 requests_per_minute = 120
 burst               = 60
+
+[payout]
+min_amount = 50000                           # minimum sekali pencairan (rupiah); key wajib sejak Paket 6
 ```
 
 Kepemilikan file (container `api`/`migrate` berjalan sebagai uid 10001,
@@ -260,7 +263,7 @@ Kode: kembalikan tag sebelumnya di `x-api-image:`, lalu `docker compose up -d`.
 Bila rollback ke versi sebelum Paket 4, kembalikan juga `docker-compose.yaml`
 lama (lihat 4.4 langkah 2); constraint database Paket 4 tetap terpasang dan
 image lama kompatibel dengannya.
-Untuk Paket 5 lihat 4.5 langkah 5.
+Untuk Paket 5 lihat 4.5 langkah 5. Untuk saldo/payout/refund (Paket 6) lihat 4.6 langkah 6 (rollback). Config lama **menolak** key yang tak dikenal: hapus section `[payout]` dari `.config.toml` sebelum kembali ke tag lama, dan tambahkan lagi sebelum naik lagi (4.6 langkah 1).
 Migration hanya maju: bila migration rilis baru tidak kompatibel dengan kode
 lama, pulihkan backup dari langkah 4 (lihat bagian 5).
 
@@ -621,6 +624,213 @@ di awal bagian 4, perintah `pg_dump` di bagian 5) sebelum `make migrate`.
 6. **Sandbox.** Nominal sandbox tidak lagi diberi akhiran acak 1-99; sandbox
    memakai aturan fee yang sama dengan Cashi (0,7%), sehingga angkanya sama
    dengan produksi.
+
+### 4.6 Cek sebelum deploy saldo merchant, payout, dan refund
+
+Rilis ini menambah saldo merchant (ledger tambah-saja), pengajuan payout,
+refund, dan status payment `refunded` (migration 021). **Satu key
+`.config.toml` baru wajib** dan ada celah waktu antara migration dan binari
+baru yang harus ditutup. Ikuti urutannya.
+
+1. **Key config baru `[payout]`: wajib untuk binari baru, DITOLAK oleh binari
+   lama.** Loader config binari baru menolak key yang hilang, dan loader
+   binari **lama** menolak key yang tidak dikenal
+   (`unknown keys: payout.min_amount`), termasuk pada `-healthcheck` Docker.
+   Akibatnya: begitu `[payout]` ada di `.config.toml`, `api` **lama** yang
+   masih berjalan menjadi `unhealthy` dalam ±30 detik (Caddy bergantung pada
+   `service_healthy`), dan bila di-restart ia menolak start. Sebaliknya
+   `make migrate` dari image baru (configenv baru) **butuh** key itu. Jadi
+   section ini ditambahkan **tepat setelah `api` lama dihentikan** dan sebelum
+   `make migrate` (langkah 3.1), bukan lebih awal:
+
+   ```toml
+   [payout]
+   min_amount = 50000
+   ```
+
+   `min_amount` harus >= 1; `.config.example.toml` di repo sudah memuatnya.
+   Bila binari baru start tanpa section ini, `docker compose logs api`
+   menunjukkan `invalid config`.
+2. **Urutan: backup -> hentikan api lama -> tambah `[payout]` -> migrate 021
+   -> jalankan binari baru.** Backup dulu (perintah `pg_dump` di bagian 5),
+   ganti tag di `x-api-image:` dan `docker compose pull api` (langkah 1-3 di
+   awal bagian 4), lalu langkah 3.
+3. **Celah migrasi -> deploy.** Backfill di migration 021 hanya mengkredit
+   payment `paid` yang ada **saat migration berjalan**. Payment produksi yang
+   menjadi `paid` oleh **binari lama** sesudah migration dan sebelum binari
+   baru berjalan **tidak terkredit** (binari lama tidak menulis ledger).
+   Migration juga mengambil lock `ACCESS EXCLUSIVE` pada `payments`,
+   `merchants`, dan `merchant_ledger` selama berjalan (dua scan validasi CHECK
+   pada `payments` + backfill; hitungan detik pada ukuran data ini) dan
+   memakai `lock_timeout = 5s`: bila gagal mendapat lock, **seluruh transaksi
+   dibatalkan** dan cukup diulang.
+   1. **Cara yang disarankan dan satu-satunya yang bebas-lock dan bebas-celah:**
+      ```bash
+      docker compose stop api
+      sudo nano .config.toml          # tambahkan [payout] (langkah 1)
+      make migrate                    # dari image baru
+      docker compose up -d            # api baru (tag baru)
+      ```
+      Selama jeda webhook Cashi tidak diterima (Cashi dapat mencoba ulang)
+      dan reconcile otomatis (tiap 2 menit) melunasi sisanya sesudah binari
+      baru hidup.
+   2. **Tidak disarankan:** migrate saat `api` lama berjalan. Menambah
+      `[payout]` (wajib untuk migrate) membuat `api` lama `unhealthy` dan
+      jangan di-restart sampai binari baru naik; migration harus berebut lock
+      dengan lalu lintas (bisa kena `lock_timeout`, ulangi); payment yang
+      jadi `paid` sebelum binari baru naik harus dikredit dengan backfill
+      ulang di bawah.
+   Menjalankan ulang backfill selalu aman: hanya payment `paid` produksi
+   ber-`merchant_net_amount = 0` yang diisi, dan unique index
+   `uq_ledger_credit_per_payment` + `ON CONFLICT DO NOTHING` mencegah kredit
+   ganda.
+
+   **Cara menjalankan ulang.** `make migrate` **tidak** bisa dipakai:
+   `scripts/migrate.sh` mencatat tiap file di tabel `schema_migrations`
+   (kolom `filename`) dan melewati yang sudah tercatat. Jalankan file migration
+   langsung dengan `psql` dari container `migrate` (image yang sama memuat
+   `migrations/` dan `scripts/lib/db.sh`, pola yang sama dengan `make
+   seed-admin`):
+
+   ```bash
+   # a) seluruh file 021 (idempoten; satu transaksi) - hanya saat api berhenti
+   docker compose run --rm migrate -c '. scripts/lib/db.sh; load_config; psql_cmd -f migrations/021_add_merchant_balance_payouts_refunds.sql'
+
+   # b) hanya dua statement backfill (antara penanda BACKFILL BEGIN/END) - aman saat api berjalan
+   docker compose run --rm migrate -c '. scripts/lib/db.sh; load_config; { echo "BEGIN;"; sed -n "/^-- BACKFILL BEGIN/,/^-- BACKFILL END/p" migrations/021_add_merchant_balance_payouts_refunds.sql; echo "COMMIT;"; } | psql_cmd'
+   ```
+
+   Opsi (a) menjalankan ulang DDL dengan lock `ACCESS EXCLUSIVE`, jadi pakai
+   hanya saat `api` berhenti. **Saat `api` berjalan, gunakan opsi (b)**
+   (hanya `UPDATE`/`INSERT` baris biasa, tanpa lock tabel). Keduanya tidak
+   mengubah baris `schema_migrations`.
+4. **Verifikasi backfill** (`docker compose exec postgres psql -U postgres
+   pg_aggregator`). Semua query harus cocok:
+
+   ```sql
+   -- payment paid produksi vs kredit ledger (net > 0)
+   SELECT COUNT(*) AS payments, COALESCE(SUM(merchant_net_amount),0) AS net
+     FROM payments WHERE status = 'paid' AND environment = 'production' AND merchant_net_amount > 0;
+   SELECT COUNT(*) AS credits, COALESCE(SUM(amount),0) AS credited
+     FROM merchant_ledger WHERE entry_type = 'payment_credit';
+   -- harus 0 baris: paid produksi ber-net > 0 tanpa kredit (net 0 memang tanpa kredit)
+   SELECT p.id, p.reference FROM payments p
+     LEFT JOIN merchant_ledger l ON l.payment_id = p.id AND l.entry_type = 'payment_credit'
+    WHERE p.status = 'paid' AND p.environment = 'production' AND p.merchant_net_amount > 0 AND l.id IS NULL;
+   -- harus 0: kredit untuk payment sandbox / bukan paid
+   SELECT COUNT(*) FROM merchant_ledger l JOIN payments p ON p.id = l.payment_id
+    WHERE l.entry_type = 'payment_credit' AND (p.environment <> 'production' OR p.status NOT IN ('paid','refunded'));
+   -- saldo per merchant
+   SELECT m.name, SUM(l.amount) AS balance FROM merchant_ledger l JOIN merchants m ON m.id = l.merchant_id GROUP BY m.id, m.name ORDER BY 2 DESC;
+   ```
+
+   Sebelum ada refund, `credits` = `payments` dan `credited` = `net`. Lalu
+   **cocokkan total keseluruhan dengan dashboard Cashi** (total yang
+   diterima akun operator dikurangi yang sudah ditransfer ke merchant).
+   Selisih **±1-2 rupiah per transaksi** wajar: rumus fee 0,7% dibulatkan ke
+   atas, Cashi bisa berbeda satu-dua rupiah; selisihnya ditanggung operator
+   dan dapat dikoreksi dengan adjustment. Periksa juga manual merchant yang
+   pernah berganti `fee_bearer` sebelum backfill: net payment lama ditentukan
+   dari `fee_amount` payment itu sendiri (`> 0` -> net = amount; `0` -> amount
+   dikurangi fee 0,7%).
+5. **Uji satu siklus penuh dengan merchant internal sebelum fitur dibuka**
+   (deploy backend dan front-end bersamaan; front-end lama tidak punya
+   halaman Balance/Payouts):
+   1. Buat dan bayar payment produksi kecil; saldo di halaman Balance
+      merchant naik sebesar net (mis. 10.000 -> 9.930).
+   2. Isi rekening payout (Settings -> Payout account; wajib password).
+   3. Ajukan payout >= 50.000 (butuh saldo cukup; tambahkan beberapa payment
+      atau adjustment uji). Saldo langsung berkurang; pengajuan kedua selagi
+      yang pertama terbuka ditolak 409.
+   4. Admin: Payouts -> **Mark paid** dengan nomor referensi transfer. Status
+      menjadi `paid`, saldo tetap.
+   5. Ajukan lagi, lalu admin **Reject** dengan alasan: saldo kembali.
+   6. Refund **sebagian** pada payment paid: saldo turun, status tetap `paid`,
+      **tidak ada** callback `payment.refunded`. Lalu refund sisanya (penuh):
+      status `refunded` dan **satu** callback `payment.refunded` terkirim
+      (cek halaman Callbacks admin atau endpoint webhook merchant uji).
+   7. Pastikan jumlah saldo = jumlah baris ledger, dan `GET
+      /api/v1/admin/balances` memuat merchant itu.
+6. **Rollback.**
+   - **Disarankan: rollback binari saja** (4.1: kembalikan tag lama,
+     `docker compose up -d`). Binari lama mengabaikan tabel/kolom baru. Tetapi
+     **payment yang menjadi `paid` selama binari lama berjalan tidak
+     terkredit**, dan payout/refund tidak bisa dipakai. Saat naik lagi,
+     **jalankan ulang backfill** (langkah 3). Jangan rollback binari bila sudah
+     ada payment `refunded`: binari lama tidak mengenal statusnya (tetap
+     tersimpan, tetapi tidak ditampilkan dengan benar). **Hapus section
+     `[payout]` dari `.config.toml` sebelum kembali ke tag lama** (config lama
+     menolak key tak dikenal; jika dibiarkan, `api` dan lewat `depends_on`
+     juga Caddy tidak naik), dan **tambahkan lagi sebelum menjalankan binari
+     baru** saat naik kembali.
+   - **Rollback skema hanya bila belum ada payout dan refund sama sekali**
+     (kalau ada, uang sungguhan sudah tercatat; pulihkan dari backup hanya
+     dengan sadar). Periksa dulu; empat kolom pertama harus 0:
+
+     ```sql
+     SELECT (SELECT COUNT(*) FROM payouts) AS payouts,
+            (SELECT COUNT(*) FROM payment_refunds) AS refunds,
+            (SELECT COUNT(*) FROM payments WHERE status = 'refunded') AS refunded_payments,
+            (SELECT COUNT(*) FROM merchant_ledger WHERE entry_type <> 'payment_credit') AS other_ledger_rows,
+            (SELECT COUNT(*) FROM merchants WHERE payout_bank_name IS NOT NULL) AS merchants_with_payout_account;
+     ```
+
+     Kolom terakhir **bukan** syarat 0, tetapi peringatan: rekening payout
+     yang sudah diisi merchant akan **hilang** bersama kolomnya dan harus
+     diisi ulang oleh merchant. Catat dulu bila perlu.
+
+     Ledger dan `merchant_net_amount` ikut hilang; saat naik lagi, migration
+     021 diterapkan ulang dari awal dan backfill menghitung ulang semuanya dari
+     `amount`/`fee_amount` (hasil sama). Jalankan dengan binari **lama** (atau
+     `api` dihentikan), dalam satu transaksi:
+
+     ```sql
+     BEGIN;
+     DROP TRIGGER IF EXISTS merchant_ledger_no_truncate ON merchant_ledger;
+     DROP TRIGGER IF EXISTS merchant_ledger_no_update ON merchant_ledger;
+     DROP TABLE merchant_ledger;        -- mengacu ke payouts dan payment_refunds, jadi lebih dulu
+     DROP FUNCTION IF EXISTS merchant_ledger_append_only();
+     DROP TABLE payment_refunds;
+     DROP TABLE payouts;
+     ALTER TABLE merchants
+         DROP COLUMN payout_bank_name,
+         DROP COLUMN payout_account_number,
+         DROP COLUMN payout_account_holder;      -- constraint merchants_payout_account_all_or_none ikut hilang
+     ALTER TABLE payments DROP CONSTRAINT payments_merchant_net_non_negative;
+     ALTER TABLE payments DROP COLUMN merchant_net_amount;
+     ALTER TABLE payments DROP CONSTRAINT payments_status_valid;
+     ALTER TABLE payments ADD CONSTRAINT payments_status_valid
+         CHECK (status IN ('pending', 'paid', 'expired', 'failed', 'cancelled'));
+     COMMENT ON CONSTRAINT payments_status_valid ON payments IS 'Must match the status constants in internal/domain/payment';
+     DELETE FROM schema_migrations WHERE filename = '021_add_merchant_balance_payouts_refunds.sql';
+     COMMIT;
+     ```
+
+     `ADD CONSTRAINT ... CHECK` gagal (dan transaksi batal) bila masih ada
+     payment `refunded`; itu sengaja. Baris `schema_migrations` dihapus supaya
+     `make migrate` berikutnya menerapkan 021 lagi. Lalu rollback tag image
+     (4.1).
+7. **Perilaku yang sudah diketahui.**
+   - **Saldo negatif diperbolehkan** setelah refund atau adjustment debit
+     (mis. saldo sudah dicairkan) dan **tidak ditagih otomatis**. Pantau lewat
+     `GET /api/v1/admin/balances?negative=true`;
+     selesaikan manual dan catat dengan adjustment. Saldo negatif memblokir
+     pengajuan payout baru.
+   - Pengajuan payout mengunci baris merchant dengan `FOR NO KEY UPDATE`;
+     refund atau adjustment yang commit **tepat bersamaan** dengan pengajuan
+     bisa membuat payout yang baru disetujui sedikit melebihi saldo baru
+     (berakhir negatif). Diterima sebagai risiko kecil.
+   - **Rate limit:** pengajuan payout merchant (`POST /merchant/payouts`) dan
+     ubah rekening (`PUT /merchant/payout-account`) memakai bucket `sensitive`
+     (default 10/menit, burst 5); aksi uang admin (bayar/tolak payout, refund,
+     adjustment) memakai bucket `api` umum (120/menit, burst 60).
+   - Pembulatan fee ±1-2 rupiah per transaksi (lihat langkah 4).
+   - **DB development yang sudah menerapkan edisi awal 021** (sebelum trigger
+     `TRUNCATE` dan komentar constraint ditambahkan) harus menerapkan ulang
+     file 021 (idempoten) untuk mendapatkan trigger
+     `merchant_ledger_no_truncate` dan komentar constraint, mis.
+     `docker compose run --rm migrate -c '. scripts/lib/db.sh; load_config; psql_cmd -f migrations/021_add_merchant_balance_payouts_refunds.sql'`.
+     Server produksi menerapkan edisi final langsung sehingga tidak perlu.
 
 ## 5. Operasional
 

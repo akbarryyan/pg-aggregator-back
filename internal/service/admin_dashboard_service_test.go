@@ -39,6 +39,7 @@ func TestAdminDashboardService_GetDashboardSummary(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusPaid).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(70))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusExpired).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(15))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusFailed).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(5))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusRefunded).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM merchants`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(20))
 	mock.ExpectQuery(`SELECT COALESCE\(SUM\(amount\), 0\) FROM payments WHERE status = \$1`).WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(int64(500000)))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM webhook_events`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(200))
@@ -46,6 +47,9 @@ func TestAdminDashboardService_GetDashboardSummary(t *testing.T) {
 	summary, err := svc.GetDashboardSummary(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary.RefundedPayments != 3 {
+		t.Fatalf("refunded = %d", summary.RefundedPayments)
 	}
 	if summary.TotalPayments != 100 || summary.TotalMerchants != 20 {
 		t.Fatalf("unexpected summary: %+v", summary)
@@ -58,13 +62,14 @@ func TestAdminDashboardService_GetDashboardCharts(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT[\s\S]*DATE\(created_at\)[\s\S]*FROM payments`).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"day", "total", "paid", "pending", "failed", "expired", "cancelled", "paid_amount",
-		}).AddRow(now, 3, 1, 1, 0, 1, 0, int64(10000)))
+			"day", "total", "paid", "pending", "failed", "expired", "cancelled", "refunded", "paid_amount",
+		}).AddRow(now, 3, 1, 1, 0, 1, 0, 0, int64(10000)))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments$`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusPending).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusPaid).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusExpired).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusFailed).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM payments WHERE status = \$1`).WithArgs(payment.StatusRefunded).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM merchants`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(`SELECT COALESCE\(SUM\(amount\), 0\) FROM payments WHERE status = \$1`).WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(int64(10000)))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM webhook_events`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -90,13 +95,13 @@ func TestAdminDashboardService_MerchantDailyStats_SingleAggregateQuery(t *testin
 
 	mock.ExpectQuery(`SELECT[\s\S]*DATE\(created_at\)[\s\S]*FROM payments`).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"day", "total", "paid", "pending", "failed", "expired", "cancelled", "paid_amount",
-		}).AddRow(now, 5, 2, 1, 1, 1, 0, int64(200000)))
+			"day", "total", "paid", "pending", "failed", "expired", "cancelled", "refunded", "paid_amount",
+		}).AddRow(now, 5, 2, 1, 1, 1, 0, 0, int64(200000)))
 
 	mock.ExpectQuery(`SELECT[\s\S]*FROM payments\s+WHERE 1=1`).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"total", "paid", "pending", "failed", "expired", "cancelled", "paid_amount",
-		}).AddRow(5, 2, 1, 1, 1, 0, int64(200000)))
+			"total", "paid", "pending", "failed", "expired", "cancelled", "refunded", "paid_amount",
+		}).AddRow(5, 2, 1, 1, 1, 0, 0, int64(200000)))
 
 	charts, err := svc.MerchantDailyStats(context.Background(), merchantID, payment.EnvironmentSandbox, 14)
 	if err != nil {

@@ -43,8 +43,8 @@ func TestMerchantHandler_GetDashboardSummary_SingleQuery(t *testing.T) {
 	// proves paid_amount is no longer silently truncated.
 	mock.ExpectQuery(`SELECT[\s\S]*FROM payments\s+WHERE 1=1`).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"total", "paid", "pending", "failed", "expired", "cancelled", "paid_amount",
-		}).AddRow(200, 150, 30, 10, 8, 2, int64(999_000_000)))
+			"total", "paid", "pending", "failed", "expired", "cancelled", "refunded", "paid_amount",
+		}).AddRow(200, 150, 30, 10, 8, 2, 0, int64(999_000_000)))
 
 	ctx := context.WithValue(context.Background(), middleware.MerchantIDContextKey, merchantID)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/merchant/dashboard/summary?environment=production", nil).WithContext(ctx)

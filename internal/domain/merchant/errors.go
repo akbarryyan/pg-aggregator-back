@@ -14,4 +14,8 @@ var (
 	ErrMerchantEmailTooLong  = errors.New("merchant email must be at most 255 characters")
 	ErrBusinessNameTooLong   = errors.New("business name must be at most 255 characters")
 	ErrMerchantPhoneTooLong  = errors.New("merchant phone must be at most 50 characters")
+
+	ErrPayoutBankInvalid          = errors.New("bank name must be 2 to 100 characters")
+	ErrPayoutAccountNumberInvalid = errors.New("account number must be 5 to 30 digits")
+	ErrPayoutHolderInvalid        = errors.New("account holder must be 2 to 150 characters")
 )

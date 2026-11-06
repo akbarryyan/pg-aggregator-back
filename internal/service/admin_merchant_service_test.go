@@ -264,7 +264,7 @@ func TestAdminMerchantService_ListMerchantPayments(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(adminPaymentCols).AddRow(
 			uuid.New(), "PAY-1", merchantID, int64(10000), "IDR", "qris",
 			"cashi", nil, "pending", "desc", nil, nil, nil, nil,
-			"production", now, nil, now, now, int64(0), "Acme",
+			"production", now, nil, now, now, int64(0), int64(0), "Acme",
 		))
 	mock.ExpectQuery(`SELECT COUNT\(\*\)`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 

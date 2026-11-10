@@ -239,6 +239,32 @@ nc -zv -w 5 13.48.71.251 8080                                 # harus gagal (ter
 docker stats --no-stream                                      # di VPS: memori di bawah batas
 ```
 
+### 3a. Web app (front-end) di VPS yang sama
+
+Front-end (repo `front/`) berjalan sebagai container `front` (server Next.js
+standalone) di balik Caddy pada `https://whuzpay.web.id`; backend tetap di
+`https://api.whuzpay.web.id`. Image dibuat di laptop dan diambil dari GHCR
+(private, sama seperti backend). `NEXT_PUBLIC_API_URL` ditanam ke bundle saat
+build, jadi satu image = satu URL API.
+
+Rilis image (di laptop, dari `front/`, sudah `docker login ghcr.io` dengan PAT
+`write:packages`):
+
+```bash
+make release VERSION=1.0.0       # linux/amd64; API_URL default https://api.whuzpay.web.id
+docker buildx imagetools inspect ghcr.io/akbarryyan/whuzpay-frontend:1.0.0
+```
+
+Di VPS: salin `docker-compose.yaml` dan `Caddyfile` terbaru dari `back/`
+(langkah 2.5), samakan tag di `x-front-image:` dengan versi yang dirilis, lalu
+`docker compose pull front && docker compose up -d` dan
+`docker compose restart caddy` (Caddyfile berubah). DNS: record A
+`whuzpay.web.id` ke IP VPS (tanpa AAAA); Caddy mengambil sertifikatnya sendiri.
+`frontend_url` di `.config.toml` harus persis `https://whuzpay.web.id` (origin
+CORS). Mengganti URL API berarti membuat image front-end baru. Image `front`
+tidak ikut `docker compose` lokal (profil `prod-only` di
+`docker-compose.override.yaml`).
+
 ## 4. Rilis berikutnya
 
 1. Laptop: `make release VERSION=1.0.1`.

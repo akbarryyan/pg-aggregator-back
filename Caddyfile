@@ -9,6 +9,26 @@
 	}
 }
 
+# Access log shared by every site. By default Caddy records every request
+# header, which would write bearer tokens and merchant API keys into the
+# container log; the filter below removes them. Do not remove it.
+(safe_log) {
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>X-Api-Key delete
+				request>headers>Cookie delete
+				request>headers>X-Gateway-Signature delete
+				request>headers>Proxy-Authorization delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+}
+
 api.whuzpay.web.id {
 	encode zstd gzip
 
@@ -28,23 +48,26 @@ api.whuzpay.web.id {
 		-Server
 	}
 
-	# Access log. By default Caddy records every request header, which would
-	# write bearer tokens and merchant API keys into the container log; the
-	# filter below removes them. Do not remove it.
-	log {
-		output stdout
-		format filter {
-			wrap json
-			fields {
-				request>headers>Authorization delete
-				request>headers>X-Api-Key delete
-				request>headers>Cookie delete
-				request>headers>X-Gateway-Signature delete
-				request>headers>Proxy-Authorization delete
-				resp_headers>Set-Cookie delete
-			}
-		}
-	}
+	import safe_log
 
 	reverse_proxy api:8080
+}
+
+# Web app. Static assets carry their own cache headers from Next.js, so no
+# blanket no-store here (unlike the API). Caddy gets the certificate as soon as
+# the DNS A record whuzpay.web.id points at this VPS.
+whuzpay.web.id {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+		-Server
+	}
+
+	import safe_log
+
+	reverse_proxy front:3000
 }

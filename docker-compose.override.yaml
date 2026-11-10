@@ -38,6 +38,11 @@ services:
     # (and fail) to get a real certificate for api.whuzpay.web.id.
     profiles: ["prod-only"]
 
+  front:
+    # The web app image is private on GHCR and only meaningful behind Caddy;
+    # locally the Next.js dev server is run from the front/ repo instead.
+    profiles: ["prod-only"]
+
   api:
     <<: *dev
     command: ["air"]

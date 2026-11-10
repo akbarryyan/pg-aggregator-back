@@ -6,6 +6,10 @@
 # migrations). api and migrate share this one tag.
 x-api-image: &api-image ghcr.io/akbarryyan/whuzpay-backend:1.0.0
 
+# Web app (Next.js standalone server), built from the front/ repo and served by
+# Caddy at https://whuzpay.web.id. Versioned independently of the API image.
+x-front-image: &front-image ghcr.io/akbarryyan/whuzpay-frontend:1.0.0
+
 x-logging: &logging
   driver: json-file
   options:
@@ -61,6 +65,24 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    logging: *logging
+
+  front:
+    image: *front-image
+    restart: unless-stopped
+    networks:
+      - whuzpay
+    environment:
+      # Keep V8's heap below mem_limit so Node GCs instead of being OOM-killed.
+      NODE_OPTIONS: --max-old-space-size=128
+    healthcheck:
+      # busybox wget ships with the alpine base image.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 192m
     logging: *logging
 
   postgres:

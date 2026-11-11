@@ -4,11 +4,11 @@
 # New release: change the tag on the next line to the pushed version, then
 # `docker compose up -d` (plus `make migrate` if the release adds
 # migrations). api and migrate share this one tag.
-x-api-image: &api-image ghcr.io/akbarryyan/whuzpay-backend:1.1.2
+x-api-image: &api-image ghcr.io/akbarryyan/whuzpay-backend:1.1.3
 
 # Web app (Next.js standalone server), built from the front/ repo and served by
 # Caddy at https://whuzpay.web.id. Versioned independently of the API image.
-x-front-image: &front-image ghcr.io/akbarryyan/whuzpay-frontend:1.0.1
+x-front-image: &front-image ghcr.io/akbarryyan/whuzpay-frontend:1.0.2
 
 x-logging: &logging
   driver: json-file

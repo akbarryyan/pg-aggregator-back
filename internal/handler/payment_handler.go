@@ -129,9 +129,11 @@ func (h *PaymentHandler) GetPaymentByReference(w http.ResponseWriter, r *http.Re
 		"status":         p.Status,
 		"description":    p.Description,
 		"payment_method": p.PaymentMethod,
-		"environment":    payment.NormalizeEnvironment(p.Environment),
-		"qris_data":      p.QRISData,
-		"expires_at":     p.ExpiresAt.UTC().Format(time.RFC3339),
+		// Who the customer is paying (display only; "" when unknown).
+		"merchant_name": h.paymentService.MerchantDisplayName(r.Context(), p.MerchantID),
+		"environment":   payment.NormalizeEnvironment(p.Environment),
+		"qris_data":     p.QRISData,
+		"expires_at":    p.ExpiresAt.UTC().Format(time.RFC3339),
 		"paid_at": func() interface{} {
 			if p.PaidAt == nil {
 				return nil

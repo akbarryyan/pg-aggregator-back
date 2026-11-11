@@ -114,6 +114,25 @@ func (s *PaymentService) checkMerchantForCreate(ctx context.Context, merchantID 
 	return merchant.FeeBearerMerchant, nil
 }
 
+// MerchantDisplayName is the name shown to a customer on the public checkout:
+// the merchant's business name, falling back to its name. It is display-only
+// and best-effort: an unwired lookup, an unknown merchant or a lookup error
+// yield "" (the page then simply omits the name) rather than failing the
+// checkout. A deactivated merchant is still named, because the payment exists.
+func (s *PaymentService) MerchantDisplayName(ctx context.Context, merchantID uuid.UUID) string {
+	if s.merchantRepo == nil {
+		return ""
+	}
+	m, err := s.merchantRepo.GetByID(ctx, merchantID)
+	if err != nil || m == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(m.BusinessName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(m.Name)
+}
+
 // chargeFor returns the amount to send to prov for a payment of nominal: the
 // bare nominal, or - when the customer bears the fee - the provider's quoted
 // total. A provider that cannot quote fails closed (ErrFeeNotSupported).

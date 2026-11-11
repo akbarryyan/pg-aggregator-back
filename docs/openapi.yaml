@@ -1261,9 +1261,11 @@ paths:
         Includes `amount` (merchant nominal), `fee_amount` (provider fee borne by
         the customer, 0 when the merchant bears it) and `total_amount`
         (`amount` + `fee_amount`, what the customer pays). The checkout page shows `total_amount`.
+        `merchant_name` is the merchant's business name (falling back to its name; empty
+        string when unknown), shown in the checkout header. Display only.
       parameters: [{ name: reference, in: path, required: true, schema: { type: string } }]
       responses:
-        '200': { description: "OK (fields include id, reference, amount, fee_amount, total_amount, currency, status)" }
+        '200': { description: "OK (fields include id, reference, merchant_name, amount, fee_amount, total_amount, currency, status)" }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/TooManyRequests' }

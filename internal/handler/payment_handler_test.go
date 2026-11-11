@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
@@ -455,4 +456,67 @@ func TestPaymentHandler_GetPaymentByReference_CarriesFeeAndTotal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The public checkout shows who is being paid: the merchant's business name
+// (falling back to its name). It is display-only and never an error source: an
+// unknown merchant or an unwired lookup yields an empty string, not a failure.
+func TestPaymentHandler_GetPaymentByReference_CarriesMerchantName(t *testing.T) {
+	get := func(t *testing.T, svc *service.PaymentService, repo *fakePaymentRepo, merchantID uuid.UUID) map[string]interface{} {
+		t.Helper()
+		h := NewPaymentHandler(svc, "http://localhost:3000")
+		_ = repo.Create(context.Background(), &payment.Payment{
+			Reference: "PAY-NAME", MerchantID: merchantID, Amount: 2000, Currency: payment.CurrencyIDR,
+			Status: payment.StatusPending, ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		})
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/public/payments/by-reference/PAY-NAME", nil)
+		req = mux.SetURLVars(req, map[string]string{"reference": "PAY-NAME"})
+		rec := httptest.NewRecorder()
+		h.GetPaymentByReference(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]interface{}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return resp
+	}
+	withMerchant := func(m *merchant.Merchant) (*service.PaymentService, *fakePaymentRepo) {
+		svc, repo := newInactiveMerchantService(m)
+		return svc, repo
+	}
+
+	t.Run("business name", func(t *testing.T) {
+		m := &merchant.Merchant{ID: uuid.New(), Name: "Owner Name", BusinessName: "Toko Maju", IsActive: true}
+		svc, repo := withMerchant(m)
+		if got := get(t, svc, repo, m.ID)["merchant_name"]; got != "Toko Maju" {
+			t.Errorf("merchant_name = %v, want Toko Maju", got)
+		}
+	})
+	t.Run("falls back to the merchant name", func(t *testing.T) {
+		m := &merchant.Merchant{ID: uuid.New(), Name: "Owner Name", BusinessName: "  ", IsActive: true}
+		svc, repo := withMerchant(m)
+		if got := get(t, svc, repo, m.ID)["merchant_name"]; got != "Owner Name" {
+			t.Errorf("merchant_name = %v, want Owner Name", got)
+		}
+	})
+	t.Run("an inactive merchant is still shown (a payment already exists)", func(t *testing.T) {
+		m := &merchant.Merchant{ID: uuid.New(), Name: "Owner", BusinessName: "Toko Tutup", IsActive: false}
+		svc, repo := withMerchant(m)
+		if got := get(t, svc, repo, m.ID)["merchant_name"]; got != "Toko Tutup" {
+			t.Errorf("merchant_name = %v, want Toko Tutup", got)
+		}
+	})
+	t.Run("unknown merchant gives an empty name, not an error", func(t *testing.T) {
+		m := &merchant.Merchant{ID: uuid.New(), BusinessName: "Other", IsActive: true}
+		svc, repo := withMerchant(m)
+		if got := get(t, svc, repo, uuid.New())["merchant_name"]; got != "" {
+			t.Errorf("merchant_name = %v, want empty", got)
+		}
+	})
+	t.Run("no merchant lookup wired gives an empty name", func(t *testing.T) {
+		svc, repo := newTestPaymentService()
+		if got := get(t, svc, repo, uuid.New())["merchant_name"]; got != "" {
+			t.Errorf("merchant_name = %v, want empty", got)
+		}
+	})
 }

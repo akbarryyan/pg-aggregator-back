@@ -94,6 +94,7 @@ func parseMerchantActiveFilter(status string) *bool {
 func (s *AdminMerchantService) ListMerchants(
 	ctx context.Context,
 	search, status string,
+	dateFrom, dateTo *time.Time,
 	limit, offset int,
 ) (*PaginatedMerchants, error) {
 	if limit <= 0 {
@@ -106,11 +107,11 @@ func (s *AdminMerchantService) ListMerchants(
 	search = strings.TrimSpace(search)
 	isActive := parseMerchantActiveFilter(status)
 
-	rows, err := s.merchantRepo.ListAdmin(ctx, search, isActive, limit, offset)
+	rows, err := s.merchantRepo.ListAdmin(ctx, search, isActive, dateFrom, dateTo, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	total, err := s.merchantRepo.CountAdmin(ctx, search, isActive)
+	total, err := s.merchantRepo.CountAdmin(ctx, search, isActive, dateFrom, dateTo)
 	if err != nil {
 		return nil, err
 	}
@@ -162,11 +163,11 @@ func (s *AdminMerchantService) CreateMerchant(ctx context.Context, req *merchant
 	return merchant.ToMerchantResponse(created), nil
 }
 
-func (s *AdminMerchantService) ExportMerchants(ctx context.Context, search, status string) ([]*merchant.Merchant, error) {
+func (s *AdminMerchantService) ExportMerchants(ctx context.Context, search, status string, dateFrom, dateTo *time.Time) ([]*merchant.Merchant, error) {
 	search = strings.TrimSpace(search)
 	isActive := parseMerchantActiveFilter(status)
 	// Cap export size for safety
-	return s.merchantRepo.ListAdmin(ctx, search, isActive, 5000, 0)
+	return s.merchantRepo.ListAdmin(ctx, search, isActive, dateFrom, dateTo, 5000, 0)
 }
 
 func (s *AdminMerchantService) GetMerchant(ctx context.Context, id uuid.UUID) (*merchant.MerchantResponse, error) {
@@ -310,4 +311,64 @@ func (s *AdminMerchantService) DeleteMerchantProviderConfig(
 		return errors.New("provider config repository not available")
 	}
 	return s.merchantProviderConfigRepo.Delete(ctx, merchantID, paymentMethod, providerName)
+}
+
+// merchantStatsDays is the sign-up window of the Merchants page chart.
+const merchantStatsDays = 14
+
+// MerchantSignupPoint is one day of the sign-up chart (the same date/label
+// shape as the payment dashboard's daily points).
+type MerchantSignupPoint struct {
+	Date  string `json:"date"`
+	Label string `json:"label"`
+	Count int64  `json:"count"`
+}
+
+// MerchantStats is the summary payload for the admin Merchants page.
+type MerchantStats struct {
+	Total    int64 `json:"total"`
+	Active   int64 `json:"active"`
+	Inactive int64 `json:"inactive"`
+	// TotalBalance is what the platform owes merchants: the sum of every
+	// merchant's ledger balance (negative balances included).
+	TotalBalance         int64                 `json:"total_balance"`
+	NegativeBalanceCount int64                 `json:"negative_balance_count"`
+	Days                 int                   `json:"days"`
+	SignupsDaily         []MerchantSignupPoint `json:"signups_daily"`
+}
+
+// Stats returns the merchant summary and the per-day sign-ups of the last
+// merchantStatsDays days (days without sign-ups are present with count 0).
+func (s *AdminMerchantService) Stats(ctx context.Context) (*MerchantStats, error) {
+	raw, err := s.merchantRepo.Stats(ctx, merchantStatsDays)
+	if err != nil {
+		return nil, err
+	}
+	return buildMerchantStats(raw, merchantStatsDays, time.Now()), nil
+}
+
+// buildMerchantStats turns the repository aggregate into the response,
+// filling every day of the window oldest-first.
+func buildMerchantStats(raw *repository.MerchantStats, days int, now time.Time) *MerchantStats {
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).
+		AddDate(0, 0, -(days - 1))
+	daily := make([]MerchantSignupPoint, 0, days)
+	for i := 0; i < days; i++ {
+		d := start.AddDate(0, 0, i)
+		key := d.Format("2006-01-02")
+		daily = append(daily, MerchantSignupPoint{
+			Date:  key,
+			Label: d.Format("02 Jan"),
+			Count: raw.SignupsByDay[key],
+		})
+	}
+	return &MerchantStats{
+		Total:                raw.Total,
+		Active:               raw.Active,
+		Inactive:             raw.Total - raw.Active,
+		TotalBalance:         raw.TotalBalance,
+		NegativeBalanceCount: raw.NegativeBalanceCount,
+		Days:                 days,
+		SignupsDaily:         daily,
+	}
 }

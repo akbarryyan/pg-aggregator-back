@@ -34,6 +34,7 @@ func adminPayoutRoutes() []routeCase {
 	id := uuid.NewString()
 	return []routeCase{
 		{http.MethodGet, apiBase + "/admin/balances", ""},
+		{http.MethodGet, apiBase + "/admin/merchants/stats", ""},
 		{http.MethodGet, apiBase + "/admin/payouts", ""},
 		{http.MethodPost, apiBase + "/admin/payouts/" + id + "/pay", `{"reference":"x"}`},
 		{http.MethodPost, apiBase + "/admin/payouts/" + id + "/reject", `{"reason":"x"}`},

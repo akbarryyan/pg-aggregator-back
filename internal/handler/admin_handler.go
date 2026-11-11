@@ -307,13 +307,29 @@ func (h *AdminHandler) ListMerchants(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parseLimitOffset(r, 20, 0)
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	result, err := h.adminMerchantService.ListMerchants(r.Context(), search, status, limit, offset)
+	dateFrom, dateTo, ok := parseDateRangeQuery(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.adminMerchantService.ListMerchants(r.Context(), search, status, dateFrom, dateTo, limit, offset)
 	if err != nil {
 		logger.ErrorfCtx(r.Context(), "Failed to list admin merchants: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to list merchants")
 		return
 	}
 	respondJSON(w, http.StatusOK, result)
+}
+
+// GetMerchantStats serves the summary cards and charts of the admin Merchants
+// page (counts, total ledger balance, sign-ups per day).
+func (h *AdminHandler) GetMerchantStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.adminMerchantService.Stats(r.Context())
+	if err != nil {
+		logger.ErrorfCtx(r.Context(), "Failed to load merchant stats: %v", err)
+		respondError(w, http.StatusInternalServerError, "Failed to load merchant stats")
+		return
+	}
+	respondJSON(w, http.StatusOK, stats)
 }
 
 func (h *AdminHandler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
@@ -350,8 +366,12 @@ func (h *AdminHandler) ExportMerchants(w http.ResponseWriter, r *http.Request) {
 	extendWriteDeadline(w, exportWriteTimeout)
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	dateFrom, dateTo, ok := parseDateRangeQuery(w, r)
+	if !ok {
+		return
+	}
 
-	rows, err := h.adminMerchantService.ExportMerchants(r.Context(), search, status)
+	rows, err := h.adminMerchantService.ExportMerchants(r.Context(), search, status, dateFrom, dateTo)
 	if err != nil {
 		logger.ErrorfCtx(r.Context(), "Failed to export merchants: %v", err)
 		respondError(w, http.StatusInternalServerError, "Failed to export merchants")

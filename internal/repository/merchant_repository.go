@@ -163,13 +163,14 @@ func (r *MerchantRepository) SetActive(ctx context.Context, id uuid.UUID, isActi
 }
 
 func (r *MerchantRepository) List(ctx context.Context, limit, offset int) ([]*merchant.Merchant, error) {
-	return r.ListAdmin(ctx, "", nil, limit, offset)
+	return r.ListAdmin(ctx, "", nil, nil, nil, limit, offset)
 }
 
 func (r *MerchantRepository) ListAdmin(
 	ctx context.Context,
 	search string,
 	isActive *bool,
+	dateFrom, dateTo *time.Time,
 	limit, offset int,
 ) ([]*merchant.Merchant, error) {
 	if limit <= 0 {
@@ -203,6 +204,19 @@ func (r *MerchantRepository) ListAdmin(
 		argN++
 	}
 
+	// created_at window: from inclusive, to exclusive (the handler turns an
+	// inclusive end date into the next day's midnight, like the payment filters).
+	if dateFrom != nil {
+		query += fmt.Sprintf(" AND created_at >= $%d", argN)
+		args = append(args, *dateFrom)
+		argN++
+	}
+	if dateTo != nil {
+		query += fmt.Sprintf(" AND created_at < $%d", argN)
+		args = append(args, *dateTo)
+		argN++
+	}
+
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argN, argN+1)
 	args = append(args, limit, offset)
 
@@ -227,10 +241,10 @@ func (r *MerchantRepository) ListAdmin(
 }
 
 func (r *MerchantRepository) Count(ctx context.Context) (int64, error) {
-	return r.CountAdmin(ctx, "", nil)
+	return r.CountAdmin(ctx, "", nil, nil, nil)
 }
 
-func (r *MerchantRepository) CountAdmin(ctx context.Context, search string, isActive *bool) (int64, error) {
+func (r *MerchantRepository) CountAdmin(ctx context.Context, search string, isActive *bool, dateFrom, dateTo *time.Time) (int64, error) {
 	query := `SELECT COUNT(*) FROM merchants WHERE 1=1`
 	args := make([]interface{}, 0, 2)
 	argN := 1
@@ -248,6 +262,16 @@ func (r *MerchantRepository) CountAdmin(ctx context.Context, search string, isAc
 			business_name ILIKE $%d
 		)`, argN, argN, argN, argN)
 		args = append(args, "%"+search+"%")
+		argN++
+	}
+	if dateFrom != nil {
+		query += fmt.Sprintf(" AND created_at >= $%d", argN)
+		args = append(args, *dateFrom)
+		argN++
+	}
+	if dateTo != nil {
+		query += fmt.Sprintf(" AND created_at < $%d", argN)
+		args = append(args, *dateTo)
 	}
 
 	var count int64

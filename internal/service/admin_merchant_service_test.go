@@ -48,7 +48,7 @@ func TestAdminMerchantService_ListMerchants(t *testing.T) {
 		}).AddRow(uuid.New(), "Acme", "a@example.com", "", "Acme Biz", nil, true, "merchant", now, now))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM merchants`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
-	result, err := svc.ListMerchants(context.Background(), "", "", 20, 0)
+	result, err := svc.ListMerchants(context.Background(), "", "", nil, nil, 20, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAdminMerchantService_ExportMerchants(t *testing.T) {
 			"id", "name", "email", "phone", "business_name", "webhook_url", "is_active", "fee_bearer", "created_at", "updated_at",
 		}).AddRow(uuid.New(), "Acme", "a@example.com", "", "Acme Biz", nil, true, "merchant", now, now))
 
-	items, err := svc.ExportMerchants(context.Background(), "", "")
+	items, err := svc.ExportMerchants(context.Background(), "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -395,5 +395,29 @@ func TestAdminMerchantService_SetFeeBearer_MerchantNotFound(t *testing.T) {
 	_, err := svc.SetFeeBearer(context.Background(), id, merchant.FeeBearerCustomer)
 	if !errors.Is(err, merchant.ErrMerchantNotFound) {
 		t.Fatalf("expected ErrMerchantNotFound, got %v", err)
+	}
+}
+
+// The created_at window is passed to both the page query and the count query:
+// from inclusive, to exclusive, placed before the LIMIT/OFFSET arguments.
+func TestAdminMerchantService_ListMerchants_DateRange(t *testing.T) {
+	svc, mock := newAdminMerchantServiceWithMock(t)
+	from := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC) // exclusive end
+
+	mock.ExpectQuery(`SELECT[\s\S]*FROM merchants[\s\S]*created_at >= \$1 AND created_at < \$2[\s\S]*LIMIT \$3 OFFSET \$4`).
+		WithArgs(from, to, 20, 0).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "name", "email", "phone", "business_name", "webhook_url", "is_active", "fee_bearer", "created_at", "updated_at",
+		}))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM merchants[\s\S]*created_at >= \$1 AND created_at < \$2`).
+		WithArgs(from, to).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	if _, err := svc.ListMerchants(context.Background(), "", "", &from, &to, 20, 0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("date range not applied to both queries: %v", err)
 	}
 }

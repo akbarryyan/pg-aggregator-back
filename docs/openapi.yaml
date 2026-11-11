@@ -334,6 +334,8 @@ paths:
         - { $ref: '#/components/parameters/Offset' }
         - { name: search, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [active, inactive] } }
+        - { name: date_from, in: query, description: Registration (created_at) window start, inclusive (YYYY-MM-DD, UTC), schema: { type: string, format: date } }
+        - { name: date_to, in: query, description: Registration window end, inclusive (YYYY-MM-DD, UTC); must not be before date_from, schema: { type: string, format: date } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedMerchants' } } } }
     post:
@@ -355,8 +357,47 @@ paths:
       parameters:
         - { name: search, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string } }
+        - { name: date_from, in: query, description: Registration (created_at) window start, inclusive (YYYY-MM-DD, UTC), schema: { type: string, format: date } }
+        - { name: date_to, in: query, description: Registration window end, inclusive (YYYY-MM-DD, UTC); must not be before date_from, schema: { type: string, format: date } }
       responses:
         '200': { description: CSV file, content: { text/csv: { schema: { type: string, format: binary } } } }
+
+  /admin/merchants/stats:
+    get:
+      tags: [Admin - Merchants]
+      summary: Merchant summary for the admin Merchants page
+      description: >
+        Head counts, what the platform owes merchants (sum of every merchant's
+        ledger balance, negative balances included) and merchant sign-ups per
+        day for the last 14 days (days without sign-ups are present with
+        count 0, oldest first; same day bucketing as the dashboard charts).
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Merchant statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, active, inactive, total_balance, negative_balance_count, days, signups_daily]
+                properties:
+                  total: { type: integer, format: int64 }
+                  active: { type: integer, format: int64 }
+                  inactive: { type: integer, format: int64 }
+                  total_balance: { type: integer, format: int64, description: Sum of all merchant ledger balances (IDR) }
+                  negative_balance_count: { type: integer, format: int64, description: Merchants whose balance is below zero }
+                  days: { type: integer, example: 14 }
+                  signups_daily:
+                    type: array
+                    items:
+                      type: object
+                      required: [date, label, count]
+                      properties:
+                        date: { type: string, example: '2026-11-10' }
+                        label: { type: string, example: '10 Nov' }
+                        count: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Failed to load merchant stats }
 
   /admin/merchants/{id}:
     get:

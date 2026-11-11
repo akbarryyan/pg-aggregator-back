@@ -326,6 +326,8 @@ func setupRouter(
 	adminAPI.HandleFunc("/merchants", adminHandler.ListMerchants).Methods("GET")
 	adminAPI.HandleFunc("/merchants", adminHandler.CreateMerchant).Methods("POST")
 	adminAPI.HandleFunc("/merchants/export", adminHandler.ExportMerchants).Methods("GET")
+	// Must stay above /merchants/{id}, which would otherwise capture "stats".
+	adminAPI.HandleFunc("/merchants/stats", adminHandler.GetMerchantStats).Methods("GET")
 	adminAPI.HandleFunc("/merchants/{id}", adminHandler.GetMerchant).Methods("GET")
 	adminAPI.HandleFunc("/merchants/{id}", adminHandler.UpdateMerchant).Methods("PUT")
 	adminAPI.HandleFunc("/merchants/{id}/status", adminHandler.SetMerchantActive).Methods("PUT")

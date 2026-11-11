@@ -119,10 +119,10 @@ func TestCreatePayment_CustomerBearsFee_Production_ResponseWithoutAmount_UsesReq
 	// The genuine settlement (provider reports the total) must verify; the
 	// bare nominal must not.
 	total, nominal := int64(100705), int64(100000)
-	if err := verifyProviderPayment(stored, &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid, Amount: &total}, &total); err != nil {
+	if err := verifyProviderPayment(stored, &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid, Amount: &total}, &total, true); err != nil {
 		t.Errorf("settlement at the total must verify, got %v", err)
 	}
-	err = verifyProviderPayment(stored, &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid, Amount: &nominal}, &nominal)
+	err = verifyProviderPayment(stored, &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid, Amount: &nominal}, &nominal, true)
 	if !errors.Is(err, payment.ErrAmountMismatch) {
 		t.Errorf("settlement at the nominal: want ErrAmountMismatch, got %v", err)
 	}

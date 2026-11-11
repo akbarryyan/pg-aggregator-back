@@ -435,7 +435,7 @@ func (s *PaymentService) reconcilePaymentData(ctx context.Context, p *payment.Pa
 		return result, nil
 	}
 
-	if verifyErr := verifyProviderPayment(p, providerStatus, nil); verifyErr != nil {
+	if verifyErr := verifyProviderPayment(p, providerStatus, nil, false); verifyErr != nil {
 		logger.ErrorfCtx(ctx, "Payment %s: %v", p.Reference, verifyErr)
 		s.recordReconcileMismatch(ctx, p, providerStatus, verifyErr)
 		result.Action = "error"

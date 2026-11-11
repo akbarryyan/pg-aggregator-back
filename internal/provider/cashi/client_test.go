@@ -409,7 +409,7 @@ func TestGetPaymentStatus(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(CheckStatusResponse{
 				Success: true,
 				Status:  "SETTLED",
-				Amount:  50078,
+				Amount:  ptrInt64(50078),
 				OrderID: "INV-123",
 			})
 		}))
@@ -428,6 +428,43 @@ func TestGetPaymentStatus(t *testing.T) {
 		}
 		if status.Amount == nil || *status.Amount != 50078 {
 			t.Errorf("expected amount 50078, got %v", status.Amount)
+		}
+	})
+
+	// The real Cashi answer for a settled order carries no amount and no
+	// order_id. It must come back as "settled, amount unknown" (nil), never
+	// as an amount of 0.
+	t.Run("settled response without amount keeps amount nil", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"status":"SETTLED","provider_tx_id":null,"is_final":true}`))
+		}))
+		defer server.Close()
+
+		adapter := NewCashiAdapter(server.URL, "my-api-key", testSecret)
+		status, err := adapter.GetPaymentStatus(context.Background(), "INV-123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if status.Status != "paid" {
+			t.Errorf("status = %q, want paid", status.Status)
+		}
+		if status.Amount != nil {
+			t.Errorf("amount = %d, want nil (not stated by Cashi)", *status.Amount)
+		}
+	})
+
+	t.Run("explicit zero amount stays zero", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"status":"SETTLED","amount":0}`))
+		}))
+		defer server.Close()
+
+		adapter := NewCashiAdapter(server.URL, "my-api-key", testSecret)
+		status, err := adapter.GetPaymentStatus(context.Background(), "INV-123")
+		if err != nil || status.Amount == nil || *status.Amount != 0 {
+			t.Fatalf("explicit amount 0 must be kept as 0, got %v err %v", status.Amount, err)
 		}
 	})
 
@@ -479,3 +516,5 @@ func TestCashiAdapter_QuoteTotal(t *testing.T) {
 		t.Error("a non-positive nominal must be rejected")
 	}
 }
+
+func ptrInt64(v int64) *int64 { return &v }

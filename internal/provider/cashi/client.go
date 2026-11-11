@@ -141,11 +141,12 @@ func (a *CashiAdapter) GetPaymentStatus(ctx context.Context, providerReference s
 		return nil, &CashiError{StatusCode: 400, Message: checkResp.Message}
 	}
 
-	amount := checkResp.Amount
+	// checkResp.Amount stays nil when Cashi omits it; the caller decides how
+	// to verify a settlement without a provider-stated amount.
 	return &provider.NormalizedPaymentStatus{
 		Status:            a.NormalizeStatus(checkResp.Status),
 		ProviderReference: checkResp.OrderID,
-		Amount:            &amount,
+		Amount:            checkResp.Amount,
 	}, nil
 }
 

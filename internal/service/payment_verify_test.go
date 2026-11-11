@@ -31,7 +31,8 @@ func TestVerifyProviderPayment(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := verifyProviderPayment(p, tc.status, tc.webhookAmount)
+			// The table models webhook verification (a webhook is in play).
+			err := verifyProviderPayment(p, tc.status, tc.webhookAmount, true)
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -79,7 +80,7 @@ func TestVerifyProviderPayment_FeeBearing(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := verifyProviderPayment(tc.p, tc.status, tc.webhookAmount)
+			err := verifyProviderPayment(tc.p, tc.status, tc.webhookAmount, true)
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -90,6 +91,52 @@ func TestVerifyProviderPayment_FeeBearing(t *testing.T) {
 				t.Fatalf("error = %v, want %v", err, tc.wantErr)
 			}
 			if err.Error() != tc.wantMsg {
+				t.Errorf("message = %q, want %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
+// Cashi confirms a settled order without restating its amount. The webhook path
+// then needs the signed webhook to state the expected amount; reconcile accepts
+// the settled status alone; an amount that IS stated must still match.
+func TestVerifyProviderPayment_ProviderOmitsAmount(t *testing.T) {
+	settledNoAmount := &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid}
+	merchantBears := &payment.Payment{Amount: 2000}
+	customerBears := &payment.Payment{Amount: 2000, FeeAmount: 15}
+
+	cases := []struct {
+		name          string
+		p             *payment.Payment
+		status        *domainProvider.NormalizedPaymentStatus
+		webhookAmount *int64
+		viaWebhook    bool
+		wantErr       error
+		wantMsg       string
+	}{
+		{"webhook states the expected amount", merchantBears, settledNoAmount, ptrInt64(2000), true, nil, ""},
+		{"webhook states the expected total (fee on top)", customerBears, settledNoAmount, ptrInt64(2015), true, nil, ""},
+		{"webhook states a different amount", merchantBears, settledNoAmount, ptrInt64(1500), true, payment.ErrWebhookAmountMismatch, "webhook_amount_mismatch: expected 2000, provider none, webhook 1500"},
+		{"webhook states only the nominal when a fee was added", customerBears, settledNoAmount, ptrInt64(2000), true, payment.ErrWebhookAmountMismatch, "webhook_amount_mismatch: expected 2015, provider none, webhook 2000"},
+		{"nobody states an amount via webhook fails closed", merchantBears, settledNoAmount, nil, true, payment.ErrAmountMismatch, "amount_mismatch: expected 2000, provider none, webhook none"},
+		{"reconcile accepts the settled status alone", merchantBears, settledNoAmount, nil, false, nil, ""},
+		{"reconcile with a customer-borne fee", customerBears, settledNoAmount, nil, false, nil, ""},
+		{"not settled is still rejected", merchantBears, &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPending}, ptrInt64(2000), true, payment.ErrNotSettledAtProvider, ""},
+		{"a stated provider amount must still match (reconcile)", merchantBears, &domainProvider.NormalizedPaymentStatus{Status: payment.StatusPaid, Amount: ptrInt64(0)}, nil, false, payment.ErrAmountMismatch, "amount_mismatch: expected 2000, provider 0, webhook none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyProviderPayment(tc.p, tc.status, tc.webhookAmount, tc.viaWebhook)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantMsg != "" && err.Error() != tc.wantMsg {
 				t.Errorf("message = %q, want %q", err.Error(), tc.wantMsg)
 			}
 		})

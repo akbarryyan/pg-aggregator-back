@@ -102,7 +102,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, providerName string
 	// payment paid.
 	providerStatus, verifyErr := s.checkProviderStatus(ctx, selectedProvider, webhookPayload.ProviderReference)
 	if verifyErr == nil {
-		verifyErr = verifyProviderPayment(p, providerStatus, webhookPayload.Amount)
+		verifyErr = verifyProviderPayment(p, providerStatus, webhookPayload.Amount, true)
 	}
 	if verifyErr != nil {
 		if errors.Is(verifyErr, payment.ErrAmountMismatch) || errors.Is(verifyErr, payment.ErrWebhookAmountMismatch) {

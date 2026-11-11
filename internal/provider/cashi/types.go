@@ -50,7 +50,12 @@ func (r CreateOrderResponse) GetOrderID() string {
 type CheckStatusResponse struct {
 	Success bool   `json:"success"`
 	Status  string `json:"status"`
-	Amount  int64  `json:"amount"`
+	// Amount is a pointer on purpose: for a settled order Cashi currently
+	// answers {"success":true,"status":"SETTLED","provider_tx_id":null,
+	// "is_final":true} WITHOUT an amount (or order_id). Absent must stay
+	// distinguishable from 0 so the settlement check does not read a missing
+	// amount as "Rp 0".
+	Amount  *int64 `json:"amount,omitempty"`
 	OrderID string `json:"order_id"`
 	Message string `json:"message,omitempty"`
 }

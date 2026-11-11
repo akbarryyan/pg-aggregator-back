@@ -135,14 +135,23 @@ bocor — tidak bisa menandai payment lunas.
 
 - Provider harus melaporkan status `paid` (selain itu `ErrNotSettledAtProvider`).
 - **Aturan nominal (gross):** `amount` dari check-status provider — dan
-  `amount` dari webhook bila ada — harus sama dengan `payments.amount`.
-  Nominal provider yang tidak diketahui ditolak (fail closed). Fee provider
-  (mis. potongan 0,7% Cashi) dipotong saat settlement dan tidak mengubah
-  nominal yang dibayar pelanggan, jadi yang dibandingkan selalu nominal
-  gross.
+  `amount` dari webhook bila ada — harus sama dengan nominal gross
+  (`payments.amount` + `fee_amount`). Fee provider (mis. potongan 0,7%
+  Cashi) dipotong saat settlement dan tidak mengubah nominal yang dibayar
+  pelanggan, jadi yang dibandingkan selalu nominal gross.
+- **Provider tidak menyebut nominal.** Untuk order yang settled, check-status
+  Cashi menjawab `{"success":true,"status":"SETTLED","provider_tx_id":null,
+  "is_final":true}` **tanpa** `amount` (adapter membiarkannya `nil`, bukan 0).
+  Itu bukan mismatch: nominal order sudah dikunci saat kita membuatnya, dan
+  provider menyatakan order itu settled. Maka: lewat **webhook**, webhook
+  bertanda tangan itu sendiri harus menyebut nominal yang diharapkan (tanpa
+  nominal dari kedua sisi = fail closed, `amount_mismatch:`; nominal webhook
+  berbeda = `webhook_amount_mismatch:`); lewat **reconcile**, status settled
+  saja diterima. Nominal yang *disebut* provider tetap harus sama persis.
 - **Mismatch** ada dua jenis, dibedakan dari awalan pesannya:
   - **Mismatch di sisi provider** (`ErrAmountMismatch`): `amount`
-    check-status tidak diketahui atau berbeda dari `payments.amount`,
+    check-status berbeda dari nominal gross (atau tidak ada nominal di kedua
+    sisi lewat webhook),
     berapa pun nominal webhook-nya. Pesan diawali `amount_mismatch:`, mis.
     `amount_mismatch: expected 2000, provider 1500, webhook 1500`. Payment
     tidak berubah, event webhook dicatat `rejected`, dan webhook dibalas

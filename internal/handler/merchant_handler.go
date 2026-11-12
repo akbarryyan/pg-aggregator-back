@@ -284,7 +284,19 @@ func (h *MerchantHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "Payment not found")
 		return
 	}
-	respondJSON(w, http.StatusOK, payment.ToPaymentResponse(p, h.frontendURL))
+	respondJSON(w, http.StatusOK, merchantPaymentDetail{
+		PaymentResponse:   payment.ToPaymentResponse(p, h.frontendURL),
+		MerchantNetAmount: service.MerchantReceives(p),
+	})
+}
+
+// merchantPaymentDetail is the dashboard's payment detail: the regular payment
+// response plus what the merchant receives (the stored net once paid, the
+// expected net before that). Dashboard-only, so the API-key payment response
+// and the public checkout stay unchanged.
+type merchantPaymentDetail struct {
+	*payment.PaymentResponse
+	MerchantNetAmount int64 `json:"merchant_net_amount"`
 }
 
 func (h *MerchantHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {

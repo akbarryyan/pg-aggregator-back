@@ -10,11 +10,13 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 )
 
 // TestMerchantHandler_GetDashboardSummary_SingleQuery covers the project
@@ -150,6 +152,55 @@ func TestMerchantHandler_RegenerateWebhookSecret_RequiresPassword(t *testing.T) 
 				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp["webhook_secret"] != *m.WebhookSecret || resp["webhook_secret"] == "" {
 					t.Errorf("response should carry the new stored secret, got %s", rec.Body.String())
 				}
+			}
+		})
+	}
+}
+
+// The dashboard payment detail adds merchant_net_amount: the stored net once
+// paid, the expected net before that.
+func TestMerchantHandler_GetPayment_IncludesMerchantNet(t *testing.T) {
+	merchantID := uuid.New()
+	repo := newFakePaymentRepo()
+	paymentSvc := service.NewPaymentService(repo, &fakeMerchantProviderConfigRepo{}, newFakeWebhookEventRepo(), providerPkg.NewProviderRouter(), "http://localhost:8080")
+	h := NewMerchantHandler(paymentSvc, nil, nil, "http://localhost:3000")
+
+	for _, tc := range []struct {
+		name     string
+		fee, net int64
+		want     float64
+	}{
+		{"pending, merchant bears fee", 0, 0, 1986},
+		{"pending, customer bears fee", 14, 0, 2000},
+		{"paid, stored net", 0, 1986, 1986},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &payment.Payment{
+				ID: uuid.New(), Reference: "PAY-" + uuid.NewString(), MerchantID: merchantID,
+				Amount: 2000, FeeAmount: tc.fee, MerchantNetAmount: tc.net,
+				Currency: payment.CurrencyIDR, Status: payment.StatusPending,
+			}
+			if err := repo.Create(context.Background(), p); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			ctx := context.WithValue(context.Background(), middleware.MerchantIDContextKey, merchantID)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/merchant/payments/"+p.ID.String(), nil).WithContext(ctx)
+			req = mux.SetURLVars(req, map[string]string{"id": p.ID.String()})
+			rec := httptest.NewRecorder()
+			h.GetPayment(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+			var resp map[string]interface{}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp["merchant_net_amount"] != tc.want {
+				t.Errorf("merchant_net_amount = %v, want %v", resp["merchant_net_amount"], tc.want)
+			}
+			if resp["reference"] != p.Reference || resp["amount"] != float64(2000) {
+				t.Errorf("regular payment fields missing: %v", resp)
 			}
 		})
 	}

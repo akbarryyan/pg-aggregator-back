@@ -858,6 +858,17 @@ baru yang harus ditutup. Ikuti urutannya.
      `docker compose run --rm migrate -c '. scripts/lib/db.sh; load_config; psql_cmd -f migrations/021_add_merchant_balance_payouts_refunds.sql'`.
      Server produksi menerapkan edisi final langsung sehingga tidak perlu.
 
+### Migration 022 — penanda Test Payment
+
+Hanya data: `customer_name` 'Dashboard test' diganti 'TEST PAYMENT' agar test
+lama muncul lagi di riwayat Test Payment. Idempoten, aman saat api berjalan:
+`make migrate`.
+
+Rollback (biasanya tidak perlu; ikut mengganti test baru yang dibuat sesudah
+migrasi karena namanya sama):
+
+    UPDATE payments SET customer_name = 'Dashboard test' WHERE customer_name = 'TEST PAYMENT';
+
 ## 5. Operasional
 
 ```bash

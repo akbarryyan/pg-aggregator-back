@@ -220,6 +220,57 @@ func TestRouter_MerchantPageStatsRoutes_ReachHandlers(t *testing.T) {
 	}
 }
 
+// The sandbox simulator routes: the merchant one is JWT-protected and reaches
+// MerchantHandler.SimulatePayment; the public one needs no auth and reaches
+// PaymentHandler.SimulateByReference.
+func TestRouter_SandboxSimulateRoutes(t *testing.T) {
+	e := newSessEnv(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	paymentSvc := service.NewPaymentService(repository.NewPaymentRepository(db), nil, nil, nil, "http://localhost:3000")
+	paymentHandler := handler.NewPaymentHandler(paymentSvc, "http://localhost:3000")
+	merchantHandler := handler.NewMerchantHandler(paymentSvc, nil, e.authSvc, "http://localhost:3000")
+	limiter := middleware.NewIPRateLimiter(1000, 1000)
+	router := setupRouter(paymentHandler, nil, handler.NewAuthHandler(e.authSvc), handler.NewAdminHandler(nil, "http://localhost:3000"), merchantHandler, nil,
+		middleware.NewAuthMiddleware(e.authSvc), nil, limiter, limiter, limiter, limiter,
+		func(context.Context) error { return nil })
+	tok := e.merchantToken(t, time.Now().UTC())
+
+	do := func(path, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"outcome":"paid"}`))
+		req.RemoteAddr = "203.0.113.9:4444"
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	merchantPath := apiBase + "/merchant/payments/" + uuid.NewString() + "/simulate"
+	if rec := do(merchantPath, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("merchant simulate without token = %d, want 401", rec.Code)
+	}
+
+	mock.ExpectQuery(`FROM payments WHERE id = \$1`).WillReturnError(sql.ErrNoRows)
+	rec := do(merchantPath, tok)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "Payment not found") {
+		t.Fatalf("merchant simulate with token = %d %s, want 404 Payment not found", rec.Code, rec.Body.String())
+	}
+
+	mock.ExpectQuery(`FROM payments WHERE reference = \$1`).WithArgs("PAY-NOPE").WillReturnError(sql.ErrNoRows)
+	rec = do(apiBase+"/public/payments/by-reference/PAY-NOPE/simulate", "")
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "Payment not found") {
+		t.Fatalf("public simulate = %d %s, want 404 Payment not found", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
 // Registration ORDER of the admin stats routes: gorilla/mux matches in
 // registration order and the auth middleware runs after matching, so only a
 // real request with an admin token proves "/x/stats" is not captured by

@@ -35,3 +35,9 @@ var (
 	ErrProviderVerificationFailed = errors.New("could not confirm the payment with the provider")
 	ErrWebhookIgnored             = errors.New("webhook event ignored: not a settlement")
 )
+
+// Sandbox simulator (PaymentService.SimulateSandboxOutcome).
+var (
+	ErrInvalidSimulationOutcome = errors.New("outcome must be one of paid, failed, expired")
+	ErrSimulationNotAllowed     = errors.New("only sandbox payments can be simulated")
+)

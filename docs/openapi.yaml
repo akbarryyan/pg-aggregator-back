@@ -1142,6 +1142,36 @@ paths:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
         '404': { description: Not found (also returned if the payment belongs to another merchant) }
 
+  /merchant/payments/{id}/simulate:
+    post:
+      tags: [Merchant Dashboard]
+      summary: Simulate a sandbox payment outcome (Test Payment page)
+      description: |
+        Sandbox only: the payment must be in the `sandbox` environment with the
+        `sandbox` provider (otherwise 403) and still `pending` (otherwise 409).
+        Goes through the real status path (`pending -> paid | failed | expired`,
+        same guards, fee/ledger crediting on `paid`) and sends the merchant
+        callback, exactly like a real settlement.
+        Returns the same object as `GET /merchant/payments/{id}`.
+      security: [{ merchantBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/PathID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [outcome]
+              properties:
+                outcome: { type: string, enum: [paid, failed, expired] }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
+        '400': { description: Invalid payment ID, body or outcome, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Payment is not a sandbox payment, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Not found (also returned if the payment belongs to another merchant) }
+        '409': { description: Payment is no longer pending, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+
   /merchant/api-keys:
     get:
       tags: [Merchant Dashboard]
@@ -1516,6 +1546,39 @@ paths:
         '200': { description: "OK (fields include id, reference, merchant_name, amount, fee_amount, total_amount, currency, status)" }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/payments/by-reference/{reference}/simulate:
+    post:
+      tags: [Public]
+      summary: Simulate a sandbox payment outcome (checkout page)
+      description: |
+        No auth. Rate limited 120 req/min per IP.
+        Sandbox only: the payment must be in the `sandbox` environment with the
+        `sandbox` provider (otherwise 403) and still `pending` (otherwise 409).
+        Goes through the real status path (`pending -> paid | failed | expired`,
+        same guards, fee/ledger crediting on `paid`) and sends the merchant
+        callback, exactly like a real settlement.
+        Anyone who knows a sandbox payment reference can finalize it (bounded by
+        the sandbox-only guard and the public rate limit); merchants should treat
+        these callbacks as test data, identifiable by `provider: "sandbox"`.
+        Returns the same object as `GET /public/payments/by-reference/{reference}`.
+      parameters: [{ name: reference, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [outcome]
+              properties:
+                outcome: { type: string, enum: [paid, failed, expired] }
+      responses:
+        '200': { description: "OK (same fields as the by-reference GET)" }
+        '400': { description: Invalid body or outcome, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Payment is not a sandbox payment, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Payment is no longer pending, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /public/payment-links/{slug}:

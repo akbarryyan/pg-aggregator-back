@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -119,7 +120,13 @@ func (h *PaymentHandler) GetPaymentByReference(w http.ResponseWriter, r *http.Re
 		return
 	}
 	// Public-safe subset (still includes QR for checkout UX)
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	respondJSON(w, http.StatusOK, h.publicPaymentJSON(r.Context(), p))
+}
+
+// publicPaymentJSON is the public-safe payment view used by the checkout page
+// (GET by reference and the sandbox simulator).
+func (h *PaymentHandler) publicPaymentJSON(ctx context.Context, p *payment.Payment) map[string]interface{} {
+	return map[string]interface{}{
 		"id":             p.ID,
 		"reference":      p.Reference,
 		"amount":         p.Amount,
@@ -130,7 +137,7 @@ func (h *PaymentHandler) GetPaymentByReference(w http.ResponseWriter, r *http.Re
 		"description":    p.Description,
 		"payment_method": p.PaymentMethod,
 		// Who the customer is paying (display only; "" when unknown).
-		"merchant_name": h.paymentService.MerchantDisplayName(r.Context(), p.MerchantID),
+		"merchant_name": h.paymentService.MerchantDisplayName(ctx, p.MerchantID),
 		"environment":   payment.NormalizeEnvironment(p.Environment),
 		"qris_data":     p.QRISData,
 		"expires_at":    p.ExpiresAt.UTC().Format(time.RFC3339),
@@ -141,7 +148,65 @@ func (h *PaymentHandler) GetPaymentByReference(w http.ResponseWriter, r *http.Re
 			return p.PaidAt.UTC().Format(time.RFC3339)
 		}(),
 		"created_at": p.CreatedAt.UTC().Format(time.RFC3339),
-	})
+	}
+}
+
+type simulateRequest struct {
+	Outcome string `json:"outcome"`
+}
+
+// decodeSimulateOutcome reads {"outcome": "..."}; false means a 400 was sent.
+func decodeSimulateOutcome(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req simulateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return "", false
+	}
+	return strings.TrimSpace(req.Outcome), true
+}
+
+// respondSimulateError maps SimulateSandboxOutcome errors to HTTP.
+func respondSimulateError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, payment.ErrInvalidSimulationOutcome):
+		respondError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, payment.ErrSimulationNotAllowed):
+		respondError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, payment.ErrPaymentAlreadyTerminal), errors.Is(err, payment.ErrInvalidStatusTransition):
+		respondError(w, http.StatusConflict, "Payment is no longer pending")
+	default:
+		logger.ErrorfCtx(r.Context(), "sandbox simulate: %v", err)
+		respondError(w, http.StatusInternalServerError, "Failed to simulate payment")
+	}
+}
+
+// SimulateByReference is the public sandbox simulator used by the checkout
+// page: POST /public/payments/by-reference/{reference}/simulate.
+func (h *PaymentHandler) SimulateByReference(w http.ResponseWriter, r *http.Request) {
+	ref := strings.TrimSpace(mux.Vars(r)["reference"])
+	if ref == "" {
+		respondError(w, http.StatusBadRequest, "Reference is required")
+		return
+	}
+	outcome, ok := decodeSimulateOutcome(w, r)
+	if !ok {
+		return
+	}
+	p, err := h.paymentService.GetPaymentByReference(r.Context(), ref)
+	if err != nil {
+		if errors.Is(err, payment.ErrPaymentNotFound) {
+			respondError(w, http.StatusNotFound, "Payment not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "Failed to load payment")
+		return
+	}
+	p, err = h.paymentService.SimulateSandboxOutcome(r.Context(), p, outcome)
+	if err != nil {
+		respondSimulateError(w, r, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, h.publicPaymentJSON(r.Context(), p))
 }
 
 func (h *PaymentHandler) GetPaymentStatus(w http.ResponseWriter, r *http.Request) {

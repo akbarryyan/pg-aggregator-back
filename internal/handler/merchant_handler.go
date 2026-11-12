@@ -532,3 +532,40 @@ func (h *MerchantHandler) RegenerateWebhookSecret(w http.ResponseWriter, r *http
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"webhook_secret": secret})
 }
+
+// SimulatePayment is the dashboard sandbox simulator (Test Payment page):
+// POST /merchant/payments/{id}/simulate. Another merchant's payment is 404.
+func (h *MerchantHandler) SimulatePayment(w http.ResponseWriter, r *http.Request) {
+	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	id, err := uuid.Parse(mux.Vars(r)["id"])
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid payment ID")
+		return
+	}
+	outcome, ok := decodeSimulateOutcome(w, r)
+	if !ok {
+		return
+	}
+	p, err := h.paymentService.GetPayment(r.Context(), id)
+	if err != nil || p.MerchantID != merchantID {
+		if err == nil || errors.Is(err, payment.ErrPaymentNotFound) {
+			respondError(w, http.StatusNotFound, "Payment not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "Failed to get payment")
+		return
+	}
+	p, err = h.paymentService.SimulateSandboxOutcome(r.Context(), p, outcome)
+	if err != nil {
+		respondSimulateError(w, r, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, merchantPaymentDetail{
+		PaymentResponse:   payment.ToPaymentResponse(p, h.frontendURL),
+		MerchantNetAmount: service.MerchantReceives(p),
+	})
+}

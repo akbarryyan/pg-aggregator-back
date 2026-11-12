@@ -3,6 +3,7 @@ package payment
 import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/fee"
 	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
+	"net/url"
 	"strings"
 	"time"
 
@@ -208,6 +209,7 @@ type PaymentResponse struct {
 	CustomerName      *string    `json:"customer_name,omitempty"`
 	CustomerEmail     *string    `json:"customer_email,omitempty"`
 	QRISData          *string    `json:"qris_data,omitempty"`
+	QRImageURL        string     `json:"qr_image_url,omitempty"`
 	CheckoutURL       string     `json:"checkout_url"`
 	Environment       string     `json:"environment"`
 	PaymentLinkID     *uuid.UUID `json:"payment_link_id,omitempty"`
@@ -215,6 +217,21 @@ type PaymentResponse struct {
 	PaidAt            *time.Time `json:"paid_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+// SandboxQRPNGPrefix is how the sandbox adapter stores its QR image.
+const SandboxQRPNGPrefix = "data:image/png;base64,"
+
+// SandboxQRImageURL is the public URL of a sandbox payment's QR image (served
+// by GET /public/payments/by-reference/{reference}/qr.png), or "" when the
+// payment is not sandbox or has no stored PNG QR. apiBaseURL is app.url.
+func SandboxQRImageURL(p *Payment, apiBaseURL string) string {
+	if p == nil || p.Environment != EnvironmentSandbox || p.QRISData == nil ||
+		!strings.HasPrefix(*p.QRISData, SandboxQRPNGPrefix) {
+		return ""
+	}
+	return strings.TrimRight(apiBaseURL, "/") + "/api/v1/public/payments/by-reference/" +
+		url.PathEscape(p.Reference) + "/qr.png"
 }
 
 func ToPaymentResponse(p *Payment, baseURL string) *PaymentResponse {

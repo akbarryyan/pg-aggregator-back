@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -68,7 +69,9 @@ func (h *PaymentHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	if res.Replayed {
 		w.Header().Set("Idempotent-Replayed", "true")
 	}
-	respondJSON(w, http.StatusCreated, payment.ToPaymentResponse(res.Payment, h.frontendURL))
+	resp := payment.ToPaymentResponse(res.Payment, h.frontendURL)
+	resp.QRImageURL = h.paymentService.QRImageURL(res.Payment)
+	respondJSON(w, http.StatusCreated, resp)
 }
 
 func (h *PaymentHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +103,7 @@ func (h *PaymentHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := payment.ToPaymentResponse(p, h.frontendURL)
+	response.QRImageURL = h.paymentService.QRImageURL(p)
 	respondJSON(w, http.StatusOK, response)
 }
 
@@ -126,7 +130,7 @@ func (h *PaymentHandler) GetPaymentByReference(w http.ResponseWriter, r *http.Re
 // publicPaymentJSON is the public-safe payment view used by the checkout page
 // (GET by reference and the sandbox simulator).
 func (h *PaymentHandler) publicPaymentJSON(ctx context.Context, p *payment.Payment) map[string]interface{} {
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"id":             p.ID,
 		"reference":      p.Reference,
 		"amount":         p.Amount,
@@ -149,6 +153,34 @@ func (h *PaymentHandler) publicPaymentJSON(ctx context.Context, p *payment.Payme
 		}(),
 		"created_at": p.CreatedAt.UTC().Format(time.RFC3339),
 	}
+	if u := h.paymentService.QRImageURL(p); u != "" {
+		out["qr_image_url"] = u
+	}
+	return out
+}
+
+// GetQRImage serves a sandbox payment's QR as PNG for the public QRIS
+// simulator. Production payments are never served.
+func (h *PaymentHandler) GetQRImage(w http.ResponseWriter, r *http.Request) {
+	ref := strings.TrimSpace(mux.Vars(r)["reference"])
+	p, err := h.paymentService.GetPaymentByReference(r.Context(), ref)
+	if err != nil || p.Environment != payment.EnvironmentSandbox || p.QRISData == nil ||
+		!strings.HasPrefix(*p.QRISData, payment.SandboxQRPNGPrefix) {
+		if err != nil && !errors.Is(err, payment.ErrPaymentNotFound) {
+			logger.ErrorfCtx(r.Context(), "qr image %s: %v", ref, err)
+		}
+		respondError(w, http.StatusNotFound, "Payment QR not found")
+		return
+	}
+	png, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(*p.QRISData, payment.SandboxQRPNGPrefix))
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Payment QR not found")
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(png)
 }
 
 type simulateRequest struct {

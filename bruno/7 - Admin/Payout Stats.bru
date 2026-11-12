@@ -1,0 +1,26 @@
+meta {
+  name: Payout Stats
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{base_url}}/api/v1/admin/payouts/stats
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Payout statistics.
+  Auth: Bearer {{admin_token}} (run Auth > Admin Login first).
+}

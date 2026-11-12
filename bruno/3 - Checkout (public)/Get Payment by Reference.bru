@@ -1,0 +1,23 @@
+meta {
+  name: Get Payment by Reference
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/api/v1/public/payments/by-reference/{{payment_reference}}
+  body: none
+  auth: none
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Public checkout lookup (no auth, rate limited). Needs payment_reference, set by Merchant API > Create Payment
+  (sandbox) or Payment Links > Initiate Payment Link Checkout.
+  Vars used: payment_reference.
+}

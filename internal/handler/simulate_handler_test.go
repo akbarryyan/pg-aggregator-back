@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
-	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
@@ -88,40 +87,5 @@ func TestPaymentHandler_SimulateByReference_NotFoundAndConflict(t *testing.T) {
 	}
 	if rec := call(p.Reference); rec.Code != http.StatusConflict {
 		t.Fatalf("second simulate must be 409, got %d", rec.Code)
-	}
-}
-
-func TestMerchantHandler_SimulatePayment(t *testing.T) {
-	svc, repo := newTestPaymentService()
-	h := NewMerchantHandler(svc, nil, nil, "http://localhost:3000")
-	owner := uuid.New()
-	p := seedHandlerSimPayment(t, repo, owner, payment.EnvironmentSandbox, "sandbox")
-
-	call := func(merchantID uuid.UUID, body string) *httptest.ResponseRecorder {
-		ctx := context.WithValue(context.Background(), middleware.MerchantIDContextKey, merchantID)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/merchant/payments/"+p.ID.String()+"/simulate", strings.NewReader(body)).WithContext(ctx)
-		req = mux.SetURLVars(req, map[string]string{"id": p.ID.String()})
-		rec := httptest.NewRecorder()
-		h.SimulatePayment(rec, req)
-		return rec
-	}
-
-	if rec := call(uuid.New(), `{"outcome":"paid"}`); rec.Code != http.StatusNotFound {
-		t.Fatalf("other merchant must get 404, got %d", rec.Code)
-	}
-	if stored, _ := repo.GetByID(context.Background(), p.ID); stored.Status != payment.StatusPending {
-		t.Fatalf("other merchant's call mutated payment to %s", stored.Status)
-	}
-	if rec := call(owner, `{"outcome":"nope"}`); rec.Code != http.StatusBadRequest {
-		t.Fatalf("bad outcome must be 400, got %d", rec.Code)
-	}
-	rec := call(owner, `{"outcome":"paid"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("owner simulate: %d %s", rec.Code, rec.Body.String())
-	}
-	var resp map[string]interface{}
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp["status"] != "paid" || resp["merchant_net_amount"] != float64(1986) {
-		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
 }

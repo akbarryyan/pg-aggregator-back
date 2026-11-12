@@ -1142,36 +1142,6 @@ paths:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
         '404': { description: Not found (also returned if the payment belongs to another merchant) }
 
-  /merchant/payments/{id}/simulate:
-    post:
-      tags: [Merchant Dashboard]
-      summary: Simulate a sandbox payment outcome (Test Payment page)
-      description: |
-        Sandbox only: the payment must be in the `sandbox` environment with the
-        `sandbox` provider (otherwise 403) and still `pending` (otherwise 409).
-        Goes through the real status path (`pending -> paid | failed | expired`,
-        same guards, fee/ledger crediting on `paid`) and sends the merchant
-        callback, exactly like a real settlement.
-        Returns the same object as `GET /merchant/payments/{id}`.
-      security: [{ merchantBearer: [] }]
-      parameters: [{ $ref: '#/components/parameters/PathID' }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [outcome]
-              properties:
-                outcome: { type: string, enum: [paid, failed, expired] }
-      responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentResponse' } } } }
-        '400': { description: Invalid payment ID, body or outcome, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { description: Payment is not a sandbox payment, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
-        '404': { description: Not found (also returned if the payment belongs to another merchant) }
-        '409': { description: Payment is no longer pending, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
-
   /merchant/api-keys:
     get:
       tags: [Merchant Dashboard]
@@ -1541,6 +1511,7 @@ paths:
         (`amount` + `fee_amount`, what the customer pays). The checkout page shows `total_amount`.
         `merchant_name` is the merchant's business name (falling back to its name; empty
         string when unknown), shown in the checkout header. Display only.
+        `qr_image_url` is present only for sandbox payments with a PNG QR.
       parameters: [{ name: reference, in: path, required: true, schema: { type: string } }]
       responses:
         '200': { description: "OK (fields include id, reference, merchant_name, amount, fee_amount, total_amount, currency, status)" }
@@ -1548,12 +1519,28 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
+  /public/payments/by-reference/{reference}/qr.png:
+    get:
+      tags: [Public]
+      summary: Sandbox payment QR as a PNG image (QRIS simulator)
+      description: |
+        No auth. Rate limited 120 req/min per IP. Only sandbox payments whose
+        stored QR is a PNG are served (`Cache-Control: public, max-age=300`);
+        production payments, unknown references and payments without a PNG QR
+        all answer 404 `Payment QR not found`.
+      parameters: [{ name: reference, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: PNG image, content: { image/png: { schema: { type: string, format: binary } } } }
+        '404': { description: Payment QR not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
   /public/payments/by-reference/{reference}/simulate:
     post:
       tags: [Public]
-      summary: Simulate a sandbox payment outcome (checkout page)
+      summary: Simulate a sandbox payment outcome (QRIS simulator page)
       description: |
-        No auth. Rate limited 120 req/min per IP.
+        No auth. Rate limited 120 req/min per IP. Used by the public QRIS simulator
+        page (`/simulator`), which scans a sandbox QR and calls this endpoint.
         Sandbox only: the payment must be in the `sandbox` environment with the
         `sandbox` provider (otherwise 403) and still `pending` (otherwise 409).
         Goes through the real status path (`pending -> paid | failed | expired`,
@@ -1942,6 +1929,7 @@ components:
         customer_name: { type: string, nullable: true }
         customer_email: { type: string, nullable: true }
         qris_data: { type: string, nullable: true }
+        qr_image_url: { type: string, description: "Sandbox payments with a PNG QR only; absent otherwise. Public URL of GET /public/payments/by-reference/{reference}/qr.png." }
         checkout_url: { type: string }
         environment: { type: string }
         payment_link_id: { type: string, format: uuid, nullable: true }

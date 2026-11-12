@@ -1,0 +1,26 @@
+meta {
+  name: Balance Daily
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{base_url}}/api/v1/merchant/balance/daily?days=14
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Daily balance chart series for the last 14 days.
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+}

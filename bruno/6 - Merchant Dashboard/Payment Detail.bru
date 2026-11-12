@@ -1,0 +1,26 @@
+meta {
+  name: Payment Detail
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/api/v1/merchant/payments/{{payment_id}}
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Detail of one payment. Vars used: payment_id.
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+}

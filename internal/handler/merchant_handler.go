@@ -284,8 +284,10 @@ func (h *MerchantHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "Payment not found")
 		return
 	}
+	detail := payment.ToPaymentResponse(p, h.frontendURL)
+	detail.QRImageURL = h.paymentService.QRImageURL(p)
 	respondJSON(w, http.StatusOK, merchantPaymentDetail{
-		PaymentResponse:   payment.ToPaymentResponse(p, h.frontendURL),
+		PaymentResponse:   detail,
 		MerchantNetAmount: service.MerchantReceives(p),
 	})
 }
@@ -336,7 +338,9 @@ func (h *MerchantHandler) CreatePayment(w http.ResponseWriter, r *http.Request) 
 	if res.Replayed {
 		w.Header().Set("Idempotent-Replayed", "true")
 	}
-	respondJSON(w, http.StatusCreated, payment.ToPaymentResponse(res.Payment, h.frontendURL))
+	resp := payment.ToPaymentResponse(res.Payment, h.frontendURL)
+	resp.QRImageURL = h.paymentService.QRImageURL(res.Payment)
+	respondJSON(w, http.StatusCreated, resp)
 }
 
 func (h *MerchantHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
@@ -531,41 +535,4 @@ func (h *MerchantHandler) RegenerateWebhookSecret(w http.ResponseWriter, r *http
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"webhook_secret": secret})
-}
-
-// SimulatePayment is the dashboard sandbox simulator (Test Payment page):
-// POST /merchant/payments/{id}/simulate. Another merchant's payment is 404.
-func (h *MerchantHandler) SimulatePayment(w http.ResponseWriter, r *http.Request) {
-	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
-	if !ok {
-		respondError(w, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	id, err := uuid.Parse(mux.Vars(r)["id"])
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid payment ID")
-		return
-	}
-	outcome, ok := decodeSimulateOutcome(w, r)
-	if !ok {
-		return
-	}
-	p, err := h.paymentService.GetPayment(r.Context(), id)
-	if err != nil || p.MerchantID != merchantID {
-		if err == nil || errors.Is(err, payment.ErrPaymentNotFound) {
-			respondError(w, http.StatusNotFound, "Payment not found")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, "Failed to get payment")
-		return
-	}
-	p, err = h.paymentService.SimulateSandboxOutcome(r.Context(), p, outcome)
-	if err != nil {
-		respondSimulateError(w, r, err)
-		return
-	}
-	respondJSON(w, http.StatusOK, merchantPaymentDetail{
-		PaymentResponse:   payment.ToPaymentResponse(p, h.frontendURL),
-		MerchantNetAmount: service.MerchantReceives(p),
-	})
 }

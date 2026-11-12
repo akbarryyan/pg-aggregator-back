@@ -386,7 +386,6 @@ func setupRouter(
 	merchantDash.HandleFunc("/payments/export", merchantHandler.ExportPayments).Methods("GET")
 	merchantDash.HandleFunc("/payments", merchantHandler.CreatePayment).Methods("POST")
 	merchantDash.HandleFunc("/payments/{id}", merchantHandler.GetPayment).Methods("GET")
-	merchantDash.HandleFunc("/payments/{id}/simulate", merchantHandler.SimulatePayment).Methods("POST")
 	merchantDash.HandleFunc("/api-keys", merchantHandler.ListAPIKeys).Methods("GET")
 	// API key create/rotate/revoke and webhook-secret rotation — sensitive
 	// account-mutation actions, previously unlimited once past JWT auth.
@@ -418,6 +417,7 @@ func setupRouter(
 
 	// Public checkout (no auth) — shareable payment link, polled by the checkout page.
 	api.Handle("/public/payments/by-reference/{reference}", publicRateLimiter.Limit(http.HandlerFunc(paymentHandler.GetPaymentByReference))).Methods("GET")
+	api.Handle("/public/payments/by-reference/{reference}/qr.png", publicRateLimiter.Limit(http.HandlerFunc(paymentHandler.GetQRImage))).Methods("GET")
 	api.Handle("/public/payments/by-reference/{reference}/simulate", publicRateLimiter.Limit(http.HandlerFunc(paymentHandler.SimulateByReference))).Methods("POST")
 
 	// Public Payment Link resolve + pay (no auth) — a reusable link; every

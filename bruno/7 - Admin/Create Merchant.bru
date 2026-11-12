@@ -1,0 +1,46 @@
+meta {
+  name: Create Merchant
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{base_url}}/api/v1/admin/merchants
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "name": "Bruno Merchant",
+    "email": "bruno.merchant@example.com",
+    "phone": "081234567890",
+    "business_name": "Bruno Store",
+    "password": "ChangeMe123!"
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.id) {
+    bru.setVar("new_merchant_id", res.body.id);
+  }
+}
+
+tests {
+  test("status is 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+}
+
+docs {
+  Creates a merchant (password required). Saves new_merchant_id. Edit the email before re-running (must be unique).
+  Auth: Bearer {{admin_token}} (run Auth > Admin Login first).
+}

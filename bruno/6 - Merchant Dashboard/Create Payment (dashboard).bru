@@ -1,0 +1,46 @@
+meta {
+  name: Create Payment (dashboard)
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{base_url}}/api/v1/merchant/payments
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "amount": 50000,
+    "description": "Bruno test - dashboard payment",
+    "payment_method": "qris",
+    "environment": "sandbox"
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.id) {
+    bru.setVar("payment_id", res.body.id);
+    bru.setVar("payment_reference", res.body.reference);
+  }
+}
+
+tests {
+  test("status is 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+}
+
+docs {
+  Creates a sandbox payment from the dashboard. Saves payment_id and payment_reference.
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+}

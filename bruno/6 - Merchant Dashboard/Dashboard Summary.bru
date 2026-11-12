@@ -1,0 +1,26 @@
+meta {
+  name: Dashboard Summary
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{base_url}}/api/v1/merchant/dashboard/summary
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Headline dashboard numbers.
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+}

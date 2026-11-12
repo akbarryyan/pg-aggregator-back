@@ -1,0 +1,26 @@
+meta {
+  name: List Merchants
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{base_url}}/api/v1/admin/merchants?limit=20
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Lists merchants.
+  Auth: Bearer {{admin_token}} (run Auth > Admin Login first).
+}

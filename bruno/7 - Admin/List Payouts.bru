@@ -1,0 +1,26 @@
+meta {
+  name: List Payouts
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{base_url}}/api/v1/admin/payouts?limit=20
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Lists payouts. Saves nothing; set payout_id via Merchant Dashboard > Request Payout.
+  Auth: Bearer {{admin_token}} (run Auth > Admin Login first).
+}

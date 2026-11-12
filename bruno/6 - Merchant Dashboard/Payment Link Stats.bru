@@ -1,0 +1,26 @@
+meta {
+  name: Payment Link Stats
+  type: http
+  seq: 10
+}
+
+get {
+  url: {{base_url}}/api/v1/merchant/payment-links/stats?environment=sandbox
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Payment link statistics for the sandbox environment.
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+}

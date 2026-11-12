@@ -1,0 +1,29 @@
+meta {
+  name: Get Payment
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/api/v1/payments/{{payment_id}}
+  body: none
+  auth: none
+}
+
+headers {
+  X-API-Key: {{merchant_api_key}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Fetches the payment saved by Create Payment (sandbox).
+  Auth: X-API-Key: {{merchant_api_key}}. Create a key in the merchant dashboard -> API keys, then paste it
+  into the merchant_api_key environment variable (Local: environments/Local.bru; Production: secret var,
+  entered in the Bruno UI, never stored in a file).
+  Vars used: merchant_api_key, payment_id.
+}

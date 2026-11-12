@@ -1,0 +1,26 @@
+meta {
+  name: List Payments
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{base_url}}/api/v1/admin/payments?limit=20
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Lists all payments.
+  Auth: Bearer {{admin_token}} (run Auth > Admin Login first).
+}

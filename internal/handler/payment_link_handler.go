@@ -278,7 +278,9 @@ func (h *PaymentLinkHandler) InitiatePaymentLinkCheckout(w http.ResponseWriter, 
 		return
 	}
 
-	respondJSON(w, http.StatusCreated, payment.ToPaymentResponse(p, h.frontendURL))
+	resp := payment.ToPaymentResponse(p, h.frontendURL)
+	resp.QRImageURL = h.linkService.QRImageURL(p)
+	respondJSON(w, http.StatusCreated, resp)
 }
 
 // parseIsActiveQuery reads ?is_active=true|false. Absent or unrecognized

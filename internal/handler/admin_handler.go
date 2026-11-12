@@ -179,7 +179,9 @@ func (h *AdminHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusCreated, payment.ToPaymentResponse(p, h.frontendURL))
+	resp := payment.ToPaymentResponse(p, h.frontendURL)
+	resp.QRImageURL = h.paymentService.QRImageURL(p)
+	respondJSON(w, http.StatusCreated, resp)
 }
 
 func (h *AdminHandler) ExportPayments(w http.ResponseWriter, r *http.Request) {

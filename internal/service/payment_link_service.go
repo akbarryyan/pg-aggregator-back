@@ -353,3 +353,11 @@ func buildPaymentLinkStats(raw *repository.PaymentLinkStats, days int, now time.
 		Daily: daily, Breakdown: toBreakdown(breakdown),
 	}
 }
+
+// QRImageURL delegates to PaymentService.QRImageURL ("" when unwired).
+func (s *PaymentLinkService) QRImageURL(p *payment.Payment) string {
+	if s.paymentSvc == nil {
+		return ""
+	}
+	return s.paymentSvc.QRImageURL(p)
+}

@@ -71,6 +71,11 @@ func NewPaymentService(
 	}
 }
 
+// QRImageURL is the public PNG URL of a sandbox payment's QR ("" otherwise).
+func (s *PaymentService) QRImageURL(p *payment.Payment) string {
+	return payment.SandboxQRImageURL(p, s.appBaseURL)
+}
+
 // WithMerchantCallbackDeps wires merchant lookup + outbound callback persistence.
 func (s *PaymentService) WithMerchantCallbackDeps(
 	merchantRepo merchantRepository,

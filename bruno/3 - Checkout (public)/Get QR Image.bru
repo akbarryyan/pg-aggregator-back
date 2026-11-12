@@ -1,0 +1,26 @@
+meta {
+  name: Get QR Image
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/api/v1/public/payments/by-reference/{{payment_reference}}/qr.png
+  body: none
+  auth: none
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("is a PNG", function () {
+    expect(res.getHeader("content-type")).to.contain("image/png");
+  });
+}
+
+docs {
+  Returns the sandbox QR as image/png (Cache-Control: public, max-age=300). Only sandbox payments have a QR
+  image; production or unknown references return 404 JSON "Payment QR not found".
+  No auth. Vars used: payment_reference (must be a sandbox payment).
+}

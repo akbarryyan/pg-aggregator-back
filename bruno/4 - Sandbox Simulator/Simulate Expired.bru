@@ -1,0 +1,34 @@
+meta {
+  name: Simulate Expired
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{base_url}}/api/v1/public/payments/by-reference/{{payment_reference}}/simulate
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "outcome": "expired"
+  }
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Simulates the sandbox provider outcome "expired" for a payment. No auth, rate limited.
+  Each run needs a FRESH PENDING sandbox payment (create one via Merchant API > Create Payment (sandbox));
+  a payment that is no longer pending is rejected. The /simulator page in the web app does the same.
+  Vars used: payment_reference.
+}

@@ -1,0 +1,51 @@
+meta {
+  name: Create Payment (sandbox)
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{base_url}}/api/v1/payments
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-API-Key: {{merchant_api_key}}
+  Idempotency-Key: {{$guid}}
+}
+
+body:json {
+  {
+    "amount": 50000,
+    "description": "Bruno test - API key sandbox payment",
+    "payment_method": "qris",
+    "customer_name": "Bruno Test Customer",
+    "customer_email": "bruno@example.com"
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.id) {
+    bru.setVar("payment_id", res.body.id);
+    bru.setVar("payment_reference", res.body.reference);
+    bru.setVar("qr_image_url", res.body.qr_image_url);
+  }
+}
+
+tests {
+  test("status is 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+}
+
+docs {
+  Creates a payment through the merchant public API. A sandbox API key yields a sandbox payment whose
+  qr_image_url points at the public qr.png endpoint.
+  Auth: X-API-Key: {{merchant_api_key}}. Create a key in the merchant dashboard -> API keys, then paste it
+  into the merchant_api_key environment variable (Local: environments/Local.bru; Production: secret var,
+  entered in the Bruno UI, never stored in a file).
+  Idempotency-Key is generated per run with Bruno's {{$guid}} dynamic variable.
+  Vars used: merchant_api_key. Vars set: payment_id, payment_reference, qr_image_url.
+}

@@ -1,0 +1,37 @@
+meta {
+  name: Adjust Balance
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{base_url}}/api/v1/admin/merchants/{{merchant_id}}/adjustments
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "amount": 1000,
+    "reason": "Bruno test adjustment"
+  }
+}
+
+tests {
+  test("status is 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+}
+
+docs {
+  Manual balance adjustment (non-zero amount, reason required; negative debits). Vars used: merchant_id.
+  Auth: Bearer {{admin_token}} (run Auth > Admin Login first).
+}

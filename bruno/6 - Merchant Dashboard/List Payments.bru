@@ -1,0 +1,26 @@
+meta {
+  name: List Payments
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/api/v1/merchant/payments?limit=20
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Lists the merchant's payments.
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+}

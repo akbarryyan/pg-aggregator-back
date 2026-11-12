@@ -1,0 +1,27 @@
+meta {
+  name: Merchant Me
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{base_url}}/api/v1/auth/me
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Returns the signed-in merchant profile.
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+  Vars used: merchant_token.
+}

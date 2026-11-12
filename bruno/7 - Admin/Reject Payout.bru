@@ -1,0 +1,36 @@
+meta {
+  name: Reject Payout
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{base_url}}/api/v1/admin/payouts/{{payout_id}}/reject
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "reason": "Bruno test rejection"
+  }
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Rejects a pending payout; a reason is required. Vars used: payout_id.
+  Auth: Bearer {{admin_token}} (run Auth > Admin Login first).
+}

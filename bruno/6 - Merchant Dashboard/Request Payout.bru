@@ -1,0 +1,42 @@
+meta {
+  name: Request Payout
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{base_url}}/api/v1/merchant/payouts
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "amount": 50000
+  }
+}
+
+script:post-response {
+  if (res.body && res.body.id) {
+    bru.setVar("payout_id", res.body.id);
+  }
+}
+
+tests {
+  test("status is 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+}
+
+docs {
+  Requests a payout. Minimum Rp 50.000 and a payout account must be configured first (otherwise a 4xx error is returned).
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+}

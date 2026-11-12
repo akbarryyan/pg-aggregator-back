@@ -1,0 +1,36 @@
+meta {
+  name: Pay Payout
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{base_url}}/api/v1/admin/payouts/{{payout_id}}/pay
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{admin_token}}
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "reference": "BRUNO-TRANSFER-001"
+  }
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Marks a pending payout as paid; body carries the bank transfer reference. Vars used: payout_id.
+  Auth: Bearer {{admin_token}} (run Auth > Admin Login first).
+}

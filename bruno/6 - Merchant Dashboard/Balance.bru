@@ -1,0 +1,26 @@
+meta {
+  name: Balance
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{base_url}}/api/v1/merchant/balance
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{merchant_token}}
+}
+
+tests {
+  test("status is 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Current balance.
+  Auth: Bearer {{merchant_token}} (run Auth > Merchant Login first).
+}

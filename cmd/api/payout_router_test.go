@@ -220,9 +220,8 @@ func TestRouter_MerchantPageStatsRoutes_ReachHandlers(t *testing.T) {
 	}
 }
 
-// The sandbox simulator routes: the merchant one is JWT-protected and reaches
-// MerchantHandler.SimulatePayment; the public one needs no auth and reaches
-// PaymentHandler.SimulateByReference.
+// The sandbox simulator routes: the public simulate and QR PNG routes need no
+// auth; the former merchant simulate route is gone.
 func TestRouter_SandboxSimulateRoutes(t *testing.T) {
 	e := newSessEnv(t)
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
@@ -250,19 +249,24 @@ func TestRouter_SandboxSimulateRoutes(t *testing.T) {
 		return rec
 	}
 
+	// The merchant simulate route was removed: no handler behind it any more.
 	merchantPath := apiBase + "/merchant/payments/" + uuid.NewString() + "/simulate"
-	if rec := do(merchantPath, ""); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("merchant simulate without token = %d, want 401", rec.Code)
+	if rec := do(merchantPath, tok); rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("merchant simulate with token = %d %s, want 404 or 405 (route removed)", rec.Code, rec.Body.String())
 	}
 
-	mock.ExpectQuery(`FROM payments WHERE id = \$1`).WillReturnError(sql.ErrNoRows)
-	rec := do(merchantPath, tok)
-	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "Payment not found") {
-		t.Fatalf("merchant simulate with token = %d %s, want 404 Payment not found", rec.Code, rec.Body.String())
+	// The public QR PNG route needs no auth and reaches PaymentHandler.GetQRImage.
+	mock.ExpectQuery(`FROM payments WHERE reference = \$1`).WithArgs("PAY-NOPE").WillReturnError(sql.ErrNoRows)
+	qrReq := httptest.NewRequest(http.MethodGet, apiBase+"/public/payments/by-reference/PAY-NOPE/qr.png", nil)
+	qrReq.RemoteAddr = "203.0.113.9:4444"
+	qrRec := httptest.NewRecorder()
+	router.ServeHTTP(qrRec, qrReq)
+	if qrRec.Code != http.StatusNotFound || !strings.Contains(qrRec.Body.String(), "Payment QR not found") {
+		t.Fatalf("qr.png = %d %s, want 404 Payment QR not found", qrRec.Code, qrRec.Body.String())
 	}
 
 	mock.ExpectQuery(`FROM payments WHERE reference = \$1`).WithArgs("PAY-NOPE").WillReturnError(sql.ErrNoRows)
-	rec = do(apiBase+"/public/payments/by-reference/PAY-NOPE/simulate", "")
+	rec := do(apiBase+"/public/payments/by-reference/PAY-NOPE/simulate", "")
 	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "Payment not found") {
 		t.Fatalf("public simulate = %d %s, want 404 Payment not found", rec.Code, rec.Body.String())
 	}

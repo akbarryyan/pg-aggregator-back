@@ -66,6 +66,25 @@ func (h *PaymentLinkHandler) ListPaymentLinks(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// GetPaymentLinkStats serves the summary cards and chart of the merchant
+// Payment Links page. The merchant comes from the session only; `environment`
+// follows the other merchant endpoints (empty or unknown = production).
+func (h *PaymentLinkHandler) GetPaymentLinkStats(w http.ResponseWriter, r *http.Request) {
+	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	env := payment.NormalizeEnvironment(strings.TrimSpace(r.URL.Query().Get("environment")))
+	stats, err := h.linkService.Stats(r.Context(), merchantID, env)
+	if err != nil {
+		logger.ErrorfCtx(r.Context(), "merchant payment link stats %s: %v", merchantID, err)
+		respondError(w, http.StatusInternalServerError, "Failed to load payment link stats")
+		return
+	}
+	respondJSON(w, http.StatusOK, stats)
+}
+
 func (h *PaymentLinkHandler) CreatePaymentLink(w http.ResponseWriter, r *http.Request) {
 	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
 	if !ok {

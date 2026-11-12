@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
 )
@@ -148,4 +149,66 @@ func toAdminCallbackItem(row repository.CallbackDeliveryRow) AdminCallbackItem {
 		item.NextRetryAt = &v
 	}
 	return item
+}
+
+// CallbackDailyPoint is one day of the callback-deliveries chart. Other =
+// pending, sending and skipped.
+type CallbackDailyPoint struct {
+	Date    string `json:"date"`
+	Label   string `json:"label"`
+	Success int64  `json:"success"`
+	Failed  int64  `json:"failed"`
+	Other   int64  `json:"other"`
+}
+
+// CallbackStats is the summary payload for the admin Callbacks page.
+// Pending counts pending + sending deliveries.
+type CallbackStats struct {
+	Days      int                  `json:"days"`
+	Total     int64                `json:"total"`
+	Success   int64                `json:"success"`
+	Failed    int64                `json:"failed"`
+	Pending   int64                `json:"pending"`
+	Skipped   int64                `json:"skipped"`
+	Daily     []CallbackDailyPoint `json:"daily"`
+	Breakdown []BreakdownPoint     `json:"breakdown"`
+}
+
+// Stats returns the delivery summary and the per-day outcome of the last
+// pageStatsDays days (days without deliveries are present with zeros).
+func (s *AdminCallbackService) Stats(ctx context.Context) (*CallbackStats, error) {
+	if s.callbackRepo == nil {
+		return buildCallbackStats(&repository.CallbackStats{}, pageStatsDays, time.Now()), nil
+	}
+	raw, err := s.callbackRepo.Stats(ctx, pageStatsDays)
+	if err != nil {
+		return nil, err
+	}
+	return buildCallbackStats(raw, pageStatsDays, time.Now()), nil
+}
+
+func buildCallbackStats(raw *repository.CallbackStats, days int, now time.Time) *CallbackStats {
+	out := &CallbackStats{
+		Days:      days,
+		Daily:     make([]CallbackDailyPoint, 0, days),
+		Breakdown: toBreakdown(raw.Breakdown),
+	}
+	for _, b := range raw.Breakdown {
+		out.Total += b.Count
+		switch b.Status {
+		case merchant.CallbackStatusSuccess:
+			out.Success += b.Count
+		case merchant.CallbackStatusFailed:
+			out.Failed += b.Count
+		case merchant.CallbackStatusPending, merchant.CallbackStatusSending:
+			out.Pending += b.Count
+		case merchant.CallbackStatusSkipped:
+			out.Skipped += b.Count
+		}
+	}
+	for _, d := range statsWindow(days, now) {
+		a := raw.DailyByDay[d.Key]
+		out.Daily = append(out.Daily, CallbackDailyPoint{Date: d.Key, Label: d.Label, Success: a.Success, Failed: a.Failed, Other: a.Other})
+	}
+	return out
 }

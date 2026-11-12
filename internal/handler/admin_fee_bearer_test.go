@@ -32,7 +32,7 @@ func newFeeBearerAdminHandler(t *testing.T) (*AdminHandler, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	svc := service.NewAdminMerchantService(repository.NewMerchantRepository(db), nil, nil)
+	svc := service.NewAdminMerchantService(repository.NewMerchantRepository(db), nil, nil, nil)
 	return NewAdminHandler(nil, "http://localhost:3000").WithMerchantAndPaymentServices(nil, svc), mock
 }
 

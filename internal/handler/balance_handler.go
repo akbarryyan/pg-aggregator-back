@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 type merchantBalanceAPI interface {
 	Overview(ctx context.Context, merchantID uuid.UUID) (*service.BalanceOverview, error)
 	Ledger(ctx context.Context, merchantID uuid.UUID, limit, offset int) ([]*ledger.Entry, int64, error)
+	Daily(ctx context.Context, merchantID uuid.UUID, days int) (*service.BalanceDaily, error)
 }
 
 type merchantPayoutAPI interface {
@@ -59,6 +61,25 @@ func (h *MerchantHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, ov)
+}
+
+// GetBalanceDaily serves the credited/debited chart of the Balance page. The
+// merchant is always the authenticated one; `days` (default 14) is clamped to
+// 1..90 by the service and an unparsable value falls back to the default.
+func (h *MerchantHandler) GetBalanceDaily(w http.ResponseWriter, r *http.Request) {
+	merchantID, ok := middleware.MerchantIDFromContext(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	days, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("days")))
+	res, err := h.balanceService.Daily(r.Context(), merchantID, days)
+	if err != nil {
+		logger.ErrorfCtx(r.Context(), "merchant balance daily %s: %v", merchantID, err)
+		respondError(w, http.StatusInternalServerError, "Failed to load balance chart")
+		return
+	}
+	respondJSON(w, http.StatusOK, res)
 }
 
 func (h *MerchantHandler) ListLedger(w http.ResponseWriter, r *http.Request) {

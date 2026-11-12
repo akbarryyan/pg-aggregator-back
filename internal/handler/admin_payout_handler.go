@@ -8,6 +8,7 @@ import (
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/ledger"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
+	"github.com/akbarryyan/pg-aggregator-back/internal/service"
 	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -22,6 +23,7 @@ type adminPayoutAPI interface {
 	ListAdmin(ctx context.Context, status string, limit, offset int) ([]*ledger.Payout, int64, error)
 	MarkPaid(ctx context.Context, id uuid.UUID, reference string, adminID *uuid.UUID) (*ledger.Payout, error)
 	Reject(ctx context.Context, id uuid.UUID, reason string, adminID *uuid.UUID) (*ledger.Payout, error)
+	Stats(ctx context.Context) (*service.PayoutStats, error)
 }
 
 // WithPayoutServices wires the balance and payout services for the admin
@@ -130,4 +132,15 @@ func (h *AdminHandler) processPayout(
 		logger.ErrorfCtx(r.Context(), "admin %s payout %s (%s): %v", adminID, id, verb, err)
 		respondError(w, http.StatusInternalServerError, "Failed to process payout")
 	}
+}
+
+// GetPayoutStats serves the summary cards and charts of the admin Payouts page.
+func (h *AdminHandler) GetPayoutStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.payoutService.Stats(r.Context())
+	if err != nil {
+		logger.ErrorfCtx(r.Context(), "Failed to load payout stats: %v", err)
+		respondError(w, http.StatusInternalServerError, "Failed to load payout stats")
+		return
+	}
+	respondJSON(w, http.StatusOK, stats)
 }

@@ -185,7 +185,7 @@ func TestRegisterRequest_Validate(t *testing.T) {
 		}
 	})
 
-	t.Run("password must be at most 72 characters", func(t *testing.T) {
+	t.Run("password must be at most 72 bytes", func(t *testing.T) {
 		req := valid()
 		req.Password = strings.Repeat("a", 73)
 		if err := req.Validate(); err != ErrMerchantPasswordTooLong {

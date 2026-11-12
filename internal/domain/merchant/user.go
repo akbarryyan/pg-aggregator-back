@@ -14,7 +14,7 @@ var (
 	ErrMerchantInvalidCredentials      = errors.New("invalid email or password")
 	ErrMerchantPasswordRequired        = errors.New("password is required")
 	ErrMerchantPasswordTooShort        = errors.New("password must be at least 8 characters")
-	ErrMerchantPasswordTooLong         = errors.New("password must be at most 72 characters")
+	ErrMerchantPasswordTooLong         = errors.New("password must be at most 72 bytes (accented or non-Latin characters count as several)")
 	ErrMerchantCurrentPasswordRequired = errors.New("current password is required")
 	ErrMerchantNewPasswordRequired     = errors.New("new password is required")
 	ErrMerchantNewPasswordTooShort     = errors.New("new password must be at least 8 characters")

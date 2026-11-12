@@ -34,6 +34,9 @@ type CreateMerchantRequest struct {
 	Phone        string  `json:"phone"`
 	BusinessName string  `json:"business_name"`
 	WebhookURL   *string `json:"webhook_url,omitempty"`
+	// Password is only used by the admin create flow (AdminMerchantService
+	// enforces it); self-registration leaves it empty. Never returned.
+	Password string `json:"password,omitempty"`
 }
 
 func (r *CreateMerchantRequest) Validate() error {

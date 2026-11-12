@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
+	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
 )
@@ -191,4 +193,67 @@ func toAdminLogItem(e *provider.WebhookEvent) AdminLogItem {
 		item.ProcessedAt = &v
 	}
 	return item
+}
+
+// WebhookEventDailyPoint is one day of the webhook-events chart.
+type WebhookEventDailyPoint struct {
+	Date      string `json:"date"`
+	Label     string `json:"label"`
+	Processed int64  `json:"processed"`
+	Failed    int64  `json:"failed"`
+}
+
+// WebhookEventStats is the summary payload for the admin Logs page.
+// processed = is_processed; ignored = processing_error is exactly one of the
+// benign sentinel messages (non-settlement webhook, duplicate webhook, payment
+// already terminal, provider test event); failed = not ignored and
+// (processing_error set or status rejected/failed). ignored is only in the
+// totals.
+type WebhookEventStats struct {
+	Days      int                      `json:"days"`
+	Total     int64                    `json:"total"`
+	Processed int64                    `json:"processed"`
+	Failed    int64                    `json:"failed"`
+	Ignored   int64                    `json:"ignored"`
+	Daily     []WebhookEventDailyPoint `json:"daily"`
+	Breakdown []BreakdownPoint         `json:"breakdown"`
+}
+
+// Stats returns the webhook-event summary and the per-day outcome of the last
+// pageStatsDays days (days without events are present with zeros).
+func (s *AdminLogService) Stats(ctx context.Context) (*WebhookEventStats, error) {
+	raw, err := s.webhookEventRepo.Stats(ctx, pageStatsDays, benignWebhookErrors())
+	if err != nil {
+		return nil, err
+	}
+	return buildWebhookEventStats(raw, pageStatsDays, time.Now()), nil
+}
+
+func buildWebhookEventStats(raw *repository.WebhookEventStats, days int, now time.Time) *WebhookEventStats {
+	out := &WebhookEventStats{
+		Days:      days,
+		Total:     raw.Total,
+		Processed: raw.Processed,
+		Failed:    raw.Failed,
+		Ignored:   raw.Ignored,
+		Daily:     make([]WebhookEventDailyPoint, 0, days),
+		Breakdown: toBreakdown(raw.Breakdown),
+	}
+	for _, d := range statsWindow(days, now) {
+		a := raw.DailyByDay[d.Key]
+		out.Daily = append(out.Daily, WebhookEventDailyPoint{Date: d.Key, Label: d.Label, Processed: a.Processed, Failed: a.Failed})
+	}
+	return out
+}
+
+// benignWebhookErrors lists the processing_error texts the webhook service
+// stores for intentional non-failures (every failWebhookEvent call in
+// payment_webhook_service.go passes one of these sentinels unwrapped).
+func benignWebhookErrors() []string {
+	return []string{
+		payment.ErrWebhookIgnored.Error(),
+		payment.ErrDuplicateWebhook.Error(),
+		payment.ErrPaymentAlreadyTerminal.Error(),
+		providerPkg.ErrTestWebhookEvent.Error(),
+	}
 }

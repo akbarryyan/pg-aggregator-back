@@ -348,7 +348,10 @@ func (h *AdminHandler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
 		switch err {
 		case merchant.ErrMerchantNameRequired,
 			merchant.ErrMerchantEmailRequired,
-			merchant.ErrBusinessNameRequired:
+			merchant.ErrBusinessNameRequired,
+			merchant.ErrMerchantPasswordRequired,
+			merchant.ErrMerchantPasswordTooShort,
+			merchant.ErrMerchantPasswordTooLong:
 			respondError(w, http.StatusBadRequest, err.Error())
 		case merchant.ErrMerchantAlreadyExists:
 			respondError(w, http.StatusConflict, "Merchant with this email already exists")
@@ -984,6 +987,28 @@ func (h *AdminHandler) ListCallbacks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, result)
+}
+
+// GetCallbackStats serves the summary cards and charts of the admin Callbacks page.
+func (h *AdminHandler) GetCallbackStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.adminCallbackService.Stats(r.Context())
+	if err != nil {
+		logger.ErrorfCtx(r.Context(), "Failed to load callback stats: %v", err)
+		respondError(w, http.StatusInternalServerError, "Failed to load callback stats")
+		return
+	}
+	respondJSON(w, http.StatusOK, stats)
+}
+
+// GetLogStats serves the summary cards and charts of the admin Logs page.
+func (h *AdminHandler) GetLogStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.adminLogService.Stats(r.Context())
+	if err != nil {
+		logger.ErrorfCtx(r.Context(), "Failed to load log stats: %v", err)
+		respondError(w, http.StatusInternalServerError, "Failed to load log stats")
+		return
+	}
+	respondJSON(w, http.StatusOK, stats)
 }
 
 func (h *AdminHandler) ListPaymentCallbacks(w http.ResponseWriter, r *http.Request) {

@@ -37,6 +37,7 @@ type payoutFake struct {
 	account     *merchant.PayoutAccount
 	entries     []*ledger.Entry
 	payouts     []*ledger.Payout
+	stats       *repository.PayoutStats
 }
 
 func (f *payoutFake) rec(name string) { f.mu.Lock(); f.calls = append(f.calls, name); f.mu.Unlock() }
@@ -80,6 +81,16 @@ func (f *payoutFake) ListAdmin(ctx context.Context, status string, l, o int) ([]
 		return f.payouts, int64(len(f.payouts)), f.err
 	}
 	return []*ledger.Payout{}, 0, f.err
+}
+func (f *payoutFake) Stats(ctx context.Context, days int) (*repository.PayoutStats, error) {
+	f.rec("stats")
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.stats != nil {
+		return f.stats, nil
+	}
+	return &repository.PayoutStats{}, nil
 }
 func (f *payoutFake) HasOpen(ctx context.Context, m uuid.UUID) (bool, error) { return false, f.err }
 func (f *payoutFake) GetPayoutAccount(ctx context.Context, id uuid.UUID) (*merchant.PayoutAccount, error) {
@@ -496,5 +507,157 @@ func TestAdminHandler_RejectEmptyReasonViaRealRepository(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("DB must not be touched: %v", err)
+	}
+}
+
+func TestAdminHandler_GetPayoutStats(t *testing.T) {
+	e := newAdminPayoutEnv()
+	e.fake.stats = &repository.PayoutStats{
+		ByStatus: map[string]repository.PayoutStatusAgg{
+			"requested": {Count: 2, Amount: 150_000},
+			"paid":      {Count: 1, Amount: 50_000},
+		},
+		Breakdown:  []repository.StatusCount{{Status: "paid", Count: 1}, {Status: "requested", Count: 2}},
+		DailyByDay: map[string]repository.PayoutDayAgg{time.Now().Format("2006-01-02"): {Count: 3, Amount: 200_000}},
+	}
+	rec := e.do(e.h.GetPayoutStats, http.MethodGet, "/x", "", nil, true)
+	if rec.Code != 200 {
+		t.Fatalf("code = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"days", "requested_count", "requested_amount", "paid_count", "paid_amount", "rejected_count", "rejected_amount", "daily", "breakdown"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("missing key %q in %s", k, rec.Body.String())
+		}
+	}
+	if got["days"] != float64(14) || got["requested_count"] != float64(2) || got["requested_amount"] != float64(150_000) ||
+		got["paid_amount"] != float64(50_000) || got["rejected_count"] != float64(0) {
+		t.Fatalf("values wrong: %s", rec.Body.String())
+	}
+	daily := got["daily"].([]any)
+	if len(daily) != 14 {
+		t.Fatalf("daily = %d points, want 14", len(daily))
+	}
+	last := daily[13].(map[string]any)
+	if last["count"] != float64(3) || last["amount"] != float64(200_000) || last["date"] == "" || last["label"] == "" {
+		t.Fatalf("today's point = %v", last)
+	}
+}
+
+func TestAdminHandler_GetPayoutStats_EmptyAndError(t *testing.T) {
+	e := newAdminPayoutEnv()
+	rec := e.do(e.h.GetPayoutStats, http.MethodGet, "/x", "", nil, true)
+	if !strings.Contains(rec.Body.String(), `"breakdown":[]`) || strings.Contains(rec.Body.String(), "null") {
+		t.Fatalf("empty body must use [] never null: %s", rec.Body.String())
+	}
+
+	e.fake.err = errors.New("pq: secret detail")
+	rec = e.do(e.h.GetPayoutStats, http.MethodGet, "/x", "", nil, true)
+	if rec.Code != 500 || strings.Contains(rec.Body.String(), "secret") {
+		t.Fatalf("error = %d %s, want generic 500", rec.Code, rec.Body.String())
+	}
+}
+
+func newStatsHandler(t *testing.T) (*AdminHandler, sqlmock.Sqlmock, sqlmock.Sqlmock) {
+	t.Helper()
+	cdb, cmock, _ := sqlmock.New()
+	ldb, lmock, _ := sqlmock.New()
+	t.Cleanup(func() { cdb.Close(); ldb.Close() })
+	h := NewAdminHandler(nil, "http://localhost:3000").WithReportingServices(nil, nil,
+		service.NewAdminLogService(nil, repository.NewWebhookEventRepository(ldb)),
+		service.NewAdminCallbackService(repository.NewMerchantCallbackRepository(cdb)))
+	return h, cmock, lmock
+}
+
+func TestAdminHandler_GetCallbackStats(t *testing.T) {
+	h, cmock, _ := newStatsHandler(t)
+	today := time.Now().Format("2006-01-02")
+	cmock.ExpectQuery("GROUP BY status").WillReturnRows(sqlmock.NewRows([]string{"status", "count"}).
+		AddRow("failed", 1).AddRow("pending", 2).AddRow("sending", 1).AddRow("skipped", 1).AddRow("success", 5))
+	cmock.ExpectQuery("GROUP BY day").WillReturnRows(sqlmock.NewRows([]string{"day", "s", "f", "o"}).
+		AddRow(time.Now(), 5, 1, 4))
+	rec := httptest.NewRecorder()
+	h.GetCallbackStats(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["total"] != float64(10) || got["success"] != float64(5) || got["failed"] != float64(1) || got["pending"] != float64(3) || got["skipped"] != float64(1) || got["days"] != float64(14) {
+		t.Fatalf("values: %s", rec.Body.String())
+	}
+	daily := got["daily"].([]any)
+	last := daily[13].(map[string]any)
+	if len(daily) != 14 || last["date"] != today || last["success"] != float64(5) || last["other"] != float64(4) {
+		t.Fatalf("daily: %v", daily)
+	}
+	if len(got["breakdown"].([]any)) != 5 {
+		t.Fatalf("breakdown: %v", got["breakdown"])
+	}
+}
+
+func TestAdminHandler_GetCallbackStats_EmptyAndError(t *testing.T) {
+	h, cmock, _ := newStatsHandler(t)
+	cmock.ExpectQuery("GROUP BY status").WillReturnRows(sqlmock.NewRows([]string{"status", "count"}))
+	cmock.ExpectQuery("GROUP BY day").WillReturnRows(sqlmock.NewRows([]string{"day", "s", "f", "o"}))
+	rec := httptest.NewRecorder()
+	h.GetCallbackStats(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if !strings.Contains(rec.Body.String(), `"breakdown":[]`) || strings.Contains(rec.Body.String(), "null") {
+		t.Fatalf("empty body: %s", rec.Body.String())
+	}
+	cmock.ExpectQuery("GROUP BY status").WillReturnError(errors.New("pq: secret detail"))
+	rec = httptest.NewRecorder()
+	h.GetCallbackStats(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != 500 || strings.Contains(rec.Body.String(), "secret") || strings.Contains(rec.Body.String(), "pq") {
+		t.Fatalf("error = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminHandler_GetLogStats(t *testing.T) {
+	h, _, lmock := newStatsHandler(t)
+	lmock.ExpectQuery("GROUP BY status").WillReturnRows(sqlmock.NewRows([]string{"status", "n", "p", "f", "i"}).
+		AddRow("ignored", 2, 0, 0, 2).AddRow("paid", 5, 5, 0, 0).AddRow("rejected", 3, 0, 3, 0))
+	lmock.ExpectQuery("GROUP BY day").WillReturnRows(sqlmock.NewRows([]string{"day", "p", "f"}).AddRow(time.Now(), 5, 3))
+	rec := httptest.NewRecorder()
+	h.GetLogStats(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["total"] != float64(10) || got["processed"] != float64(5) || got["failed"] != float64(3) || got["ignored"] != float64(2) || got["days"] != float64(14) {
+		t.Fatalf("values: %s", rec.Body.String())
+	}
+	daily := got["daily"].([]any)
+	last := daily[13].(map[string]any)
+	if len(daily) != 14 || last["processed"] != float64(5) || last["failed"] != float64(3) {
+		t.Fatalf("daily: %v", daily)
+	}
+	if _, has := last["ignored"]; has {
+		t.Fatal("daily must not carry ignored")
+	}
+}
+
+func TestAdminHandler_GetLogStats_EmptyAndError(t *testing.T) {
+	h, _, lmock := newStatsHandler(t)
+	lmock.ExpectQuery("GROUP BY status").WillReturnRows(sqlmock.NewRows([]string{"status", "n", "p", "f", "i"}))
+	lmock.ExpectQuery("GROUP BY day").WillReturnRows(sqlmock.NewRows([]string{"day", "p", "f"}))
+	rec := httptest.NewRecorder()
+	h.GetLogStats(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if !strings.Contains(rec.Body.String(), `"breakdown":[]`) || strings.Contains(rec.Body.String(), "null") {
+		t.Fatalf("empty body: %s", rec.Body.String())
+	}
+	lmock.ExpectQuery("GROUP BY status").WillReturnError(errors.New("pq: secret detail"))
+	rec = httptest.NewRecorder()
+	h.GetLogStats(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != 500 || strings.Contains(rec.Body.String(), "secret") || strings.Contains(rec.Body.String(), "pq") {
+		t.Fatalf("error = %d %s", rec.Code, rec.Body.String())
 	}
 }

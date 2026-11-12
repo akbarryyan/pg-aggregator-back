@@ -101,7 +101,7 @@ func newBusinessHandler(t *testing.T) (*MerchantHandler, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	svc := service.NewAdminMerchantService(repository.NewMerchantRepository(db), nil, nil)
+	svc := service.NewAdminMerchantService(repository.NewMerchantRepository(db), nil, nil, nil)
 	h := NewMerchantHandler(nil, nil, nil, "http://localhost:3000").
 		WithMerchantAndPaymentServices(nil, svc)
 	return h, mock
@@ -153,7 +153,7 @@ func TestAdminHandler_UpdateMerchant_UnknownErrorIsGeneric(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectQuery(`FROM merchants`).WillReturnError(errors.New(leakyDBError))
-	svc := service.NewAdminMerchantService(repository.NewMerchantRepository(db), nil, nil)
+	svc := service.NewAdminMerchantService(repository.NewMerchantRepository(db), nil, nil, nil)
 	h := NewAdminHandler(nil, "http://localhost:3000").WithMerchantAndPaymentServices(nil, svc)
 
 	id := uuid.New()

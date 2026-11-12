@@ -58,7 +58,7 @@ func TestRouter_AdminFeeBearer_AdminTokenReachesHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	merchantSvc := service.NewAdminMerchantService(repository.NewMerchantRepository(db), nil, nil)
+	merchantSvc := service.NewAdminMerchantService(repository.NewMerchantRepository(db), nil, nil, nil)
 	adminHandler := handler.NewAdminHandler(nil, "http://localhost:3000").WithMerchantAndPaymentServices(nil, merchantSvc)
 	limiter := middleware.NewIPRateLimiter(1000, 1000)
 	router := setupRouter(nil, nil, handler.NewAuthHandler(e.authSvc), adminHandler, nil, nil,

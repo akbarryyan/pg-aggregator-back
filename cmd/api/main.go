@@ -95,7 +95,7 @@ func main() {
 		WithMerchantCallbackDeps(merchantRepo, callbackRepo).
 		WithSandboxProvider(sandboxAdapter).
 		WithIdempotency(idempotencyRepo)
-	paymentLinkService := service.NewPaymentLinkService(paymentLinkRepo, paymentRepo, paymentService)
+	paymentLinkService := service.NewPaymentLinkService(paymentLinkRepo, paymentRepo, paymentService).WithStats(paymentLinkRepo)
 	authService := service.NewAuthService(adminRepo, cfg.Security.JWTSecret).
 		WithMerchantAuth(merchantUserRepo, merchantRepo)
 	apiKeyService := service.NewMerchantAPIKeyService(apiKeyRepo, merchantRepo)
@@ -103,14 +103,14 @@ func main() {
 	// project backlog item #9, into these cohesive services — it no longer
 	// exists as a type.
 	adminPaymentService := service.NewAdminPaymentService(paymentRepo, merchantRepo)
-	adminMerchantService := service.NewAdminMerchantService(merchantRepo, merchantProviderConfigRepo, adminPaymentService).WithProviderRegistry(providerRouter)
+	adminMerchantService := service.NewAdminMerchantService(merchantRepo, merchantProviderConfigRepo, merchantUserRepo, adminPaymentService).WithProviderRegistry(providerRouter)
 	adminProviderService := service.NewAdminProviderService(paymentRepo, merchantProviderConfigRepo, providerRouter)
 	adminDashboardService := service.NewAdminDashboardService(merchantRepo, paymentRepo, webhookEventRepo, adminPaymentService)
 	adminNotificationService := service.NewAdminNotificationService(paymentRepo, webhookEventRepo).
 		WithCallbackRepo(callbackRepo).
 		WithPayoutQueue(payoutRepo)
 	payoutService := service.NewPayoutService(payoutRepo, merchantRepo, cfg.Payout.MinAmount)
-	balanceService := service.NewBalanceService(ledgerRepo, merchantRepo, payoutRepo, cfg.Payout.MinAmount)
+	balanceService := service.NewBalanceService(ledgerRepo, merchantRepo, payoutRepo, cfg.Payout.MinAmount).WithDaily(ledgerRepo)
 	refundService := service.NewRefundService(refundRepo, ledgerRepo, paymentService).WithLister(refundRepo)
 	adminLogService := service.NewAdminLogService(paymentRepo, webhookEventRepo)
 	adminCallbackService := service.NewAdminCallbackService(callbackRepo)
@@ -350,15 +350,21 @@ func setupRouter(
 	adminAPI.HandleFunc("/merchants/{id}/provider-configs", adminHandler.DeleteMerchantProviderConfig).Methods("DELETE")
 	adminAPI.HandleFunc("/notifications", adminHandler.ListNotifications).Methods("GET")
 	adminAPI.HandleFunc("/callbacks", adminHandler.ListCallbacks).Methods("GET")
+	// Must stay above the parameterised /callbacks/{id}/... routes.
+	adminAPI.HandleFunc("/callbacks/stats", adminHandler.GetCallbackStats).Methods("GET")
 	adminAPI.HandleFunc("/callbacks/{id}/retry", adminHandler.RetryCallback).Methods("POST")
 	adminAPI.HandleFunc("/payments/{id}/callbacks", adminHandler.ListPaymentCallbacks).Methods("GET")
 	adminAPI.HandleFunc("/logs", adminHandler.ListLogs).Methods("GET")
+	// Must stay above /logs/{id}, which would otherwise capture "stats".
+	adminAPI.HandleFunc("/logs/stats", adminHandler.GetLogStats).Methods("GET")
 	adminAPI.HandleFunc("/logs/export", adminHandler.ExportLogs).Methods("GET")
 	adminAPI.HandleFunc("/logs/{id}", adminHandler.GetLog).Methods("GET")
 	// Merchant balances and payouts (admin side; see the limiter note below).
 	adminAPI.HandleFunc("/balances", adminHandler.ListBalances).Methods("GET")
 	adminAPI.HandleFunc("/merchants/{id}/ledger", adminHandler.ListMerchantLedger).Methods("GET")
 	adminAPI.HandleFunc("/payouts", adminHandler.ListPayouts).Methods("GET")
+	// Must stay above the /payouts/{id}/... routes.
+	adminAPI.HandleFunc("/payouts/stats", adminHandler.GetPayoutStats).Methods("GET")
 	adminAPI.HandleFunc("/payouts/{id}/pay", adminHandler.PayPayout).Methods("POST")
 	adminAPI.HandleFunc("/payouts/{id}/reject", adminHandler.RejectPayout).Methods("POST")
 	// Refunds and adjustments: admin-only and guarded in the DB (row lock,
@@ -393,12 +399,17 @@ func setupRouter(
 	// JWT. Changing the payout account (password) and requesting a payout move
 	// money, so they use the sensitive bucket as well.
 	merchantDash.HandleFunc("/balance", merchantHandler.GetBalance).Methods("GET")
+	// Chart series of the Balance page; merchant from the session only.
+	merchantDash.HandleFunc("/balance/daily", merchantHandler.GetBalanceDaily).Methods("GET")
 	merchantDash.HandleFunc("/ledger", merchantHandler.ListLedger).Methods("GET")
 	merchantDash.Handle("/payout-account", sensitiveRateLimiter.Limit(http.HandlerFunc(merchantHandler.UpdatePayoutAccount))).Methods("PUT")
 	merchantDash.Handle("/payouts", sensitiveRateLimiter.Limit(http.HandlerFunc(merchantHandler.RequestPayout))).Methods("POST")
 	merchantDash.HandleFunc("/payouts", merchantHandler.ListPayouts).Methods("GET")
 	merchantDash.HandleFunc("/payment-links", paymentLinkHandler.ListPaymentLinks).Methods("GET")
 	merchantDash.HandleFunc("/payment-links", paymentLinkHandler.CreatePaymentLink).Methods("POST")
+	// "/payment-links/stats" MUST be registered before "/payment-links/{id}"
+	// (gorilla/mux matches in order, so "stats" would otherwise be taken as an id).
+	merchantDash.HandleFunc("/payment-links/stats", paymentLinkHandler.GetPaymentLinkStats).Methods("GET")
 	merchantDash.HandleFunc("/payment-links/{id}", paymentLinkHandler.GetPaymentLink).Methods("GET")
 	merchantDash.HandleFunc("/payment-links/{id}", paymentLinkHandler.UpdatePaymentLink).Methods("PUT")
 	merchantDash.HandleFunc("/payment-links/{id}/status", paymentLinkHandler.SetPaymentLinkActive).Methods("PUT")

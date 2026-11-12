@@ -9,6 +9,7 @@ import (
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/ledger"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
+	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
 )
 
@@ -38,6 +39,9 @@ func (r *stubPayoutRepo) ListByMerchant(ctx context.Context, m uuid.UUID, l, o i
 }
 func (r *stubPayoutRepo) ListAdmin(ctx context.Context, s string, l, o int) ([]*ledger.Payout, int64, error) {
 	return nil, 0, r.err
+}
+func (r *stubPayoutRepo) Stats(ctx context.Context, days int) (*repository.PayoutStats, error) {
+	return &repository.PayoutStats{}, r.err
 }
 func (r *stubPayoutRepo) HasOpen(ctx context.Context, m uuid.UUID) (bool, error) {
 	return r.open, r.err

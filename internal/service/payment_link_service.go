@@ -2,6 +2,7 @@ package service
 
 import (
 	cryptorand "crypto/rand"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/payment"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/paymentlink"
+	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
 	"github.com/google/uuid"
 )
 
@@ -22,6 +24,7 @@ type PaymentLinkService struct {
 	linkRepo    paymentLinkRepository
 	paymentRepo paymentRepository
 	paymentSvc  *PaymentService
+	stats       paymentLinkStatsRepository
 }
 
 func NewPaymentLinkService(linkRepo paymentLinkRepository, paymentRepo paymentRepository, paymentSvc *PaymentService) *PaymentLinkService {
@@ -280,4 +283,73 @@ func (s *PaymentLinkService) InitiateCheckout(
 	}
 
 	return s.paymentSvc.CreatePayment(ctx, createReq)
+}
+
+// paymentLinkStatsRepository is the aggregate read behind the Payment Links
+// page summary; *repository.PaymentLinkRepository satisfies it.
+type paymentLinkStatsRepository interface {
+	Stats(ctx context.Context, merchantID uuid.UUID, environment string, days int) (*repository.PaymentLinkStats, error)
+}
+
+// WithStats wires the stats repository (kept out of the constructor so the
+// CRUD wiring and its fakes stay unchanged).
+func (s *PaymentLinkService) WithStats(r paymentLinkStatsRepository) *PaymentLinkService {
+	s.stats = r
+	return s
+}
+
+// PaymentLinkDailyPoint is one day of the paid-via-link chart.
+type PaymentLinkDailyPoint struct {
+	Date       string `json:"date"`
+	Label      string `json:"label"`
+	PaidCount  int64  `json:"paid_count"`
+	PaidAmount int64  `json:"paid_amount"`
+}
+
+// PaymentLinkStats is the summary payload for the merchant Payment Links page.
+type PaymentLinkStats struct {
+	Days       int                     `json:"days"`
+	Total      int64                   `json:"total"`
+	Active     int64                   `json:"active"`
+	Inactive   int64                   `json:"inactive"`
+	Fixed      int64                   `json:"fixed"`
+	Open       int64                   `json:"open"`
+	PaidCount  int64                   `json:"paid_count"`
+	PaidAmount int64                   `json:"paid_amount"`
+	Daily      []PaymentLinkDailyPoint `json:"daily"`
+	Breakdown  []BreakdownPoint        `json:"breakdown"`
+}
+
+// Stats returns the merchant's link summary for the given environment and the
+// per-day paid-via-link series of the last pageStatsDays days (empty days = 0).
+func (s *PaymentLinkService) Stats(ctx context.Context, merchantID uuid.UUID, environment string) (*PaymentLinkStats, error) {
+	if s.stats == nil {
+		return nil, errors.New("payment link stats repository not configured")
+	}
+	raw, err := s.stats.Stats(ctx, merchantID, environment, pageStatsDays)
+	if err != nil {
+		return nil, err
+	}
+	return buildPaymentLinkStats(raw, pageStatsDays, time.Now()), nil
+}
+
+func buildPaymentLinkStats(raw *repository.PaymentLinkStats, days int, now time.Time) *PaymentLinkStats {
+	daily := make([]PaymentLinkDailyPoint, 0, days)
+	for _, d := range statsWindow(days, now) {
+		a := raw.DailyByDay[d.Key]
+		daily = append(daily, PaymentLinkDailyPoint{Date: d.Key, Label: d.Label, PaidCount: a.PaidCount, PaidAmount: a.PaidAmount})
+	}
+	inactive := raw.Total - raw.Active
+	breakdown := []repository.StatusCount{}
+	if raw.Active > 0 {
+		breakdown = append(breakdown, repository.StatusCount{Status: "active", Count: raw.Active})
+	}
+	if inactive > 0 {
+		breakdown = append(breakdown, repository.StatusCount{Status: "inactive", Count: inactive})
+	}
+	return &PaymentLinkStats{
+		Days: days, Total: raw.Total, Active: raw.Active, Inactive: inactive,
+		Fixed: raw.Fixed, Open: raw.Open, PaidCount: raw.PaidCount, PaidAmount: raw.PaidAmount,
+		Daily: daily, Breakdown: toBreakdown(breakdown),
+	}
 }

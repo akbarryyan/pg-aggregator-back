@@ -668,6 +668,54 @@ paths:
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedCallbacks' } } } }
 
+  /admin/callbacks/stats:
+    get:
+      tags: [Admin - Callbacks]
+      summary: Callback delivery summary for the admin Callbacks page
+      description: >
+        Delivery counts per outcome (pending includes sending) and deliveries
+        per day (by created_at) for the last 14 days split into success,
+        failed and other (pending, sending, skipped).
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Callback statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [days, total, success, failed, pending, skipped, daily, breakdown]
+                properties:
+                  days: { type: integer, example: 14 }
+                  total: { type: integer, format: int64 }
+                  success: { type: integer, format: int64 }
+                  failed: { type: integer, format: int64 }
+                  pending: { type: integer, format: int64, description: pending + sending }
+                  skipped: { type: integer, format: int64 }
+                  daily:
+                    type: array
+                    description: Exactly 14 points, oldest first; days without rows are zero
+                    items:
+                      type: object
+                      required: [date, label, success, failed, other]
+                      properties:
+                        date: { type: string, example: '2026-11-10' }
+                        label: { type: string, example: '10 Nov' }
+                        success: { type: integer, format: int64 }
+                        failed: { type: integer, format: int64 }
+                        other: { type: integer, format: int64 }
+                  breakdown:
+                    type: array
+                    description: One entry per status present (empty array when there are no rows)
+                    items:
+                      type: object
+                      required: [status, count]
+                      properties:
+                        status: { type: string }
+                        count: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Failed to load callback stats }
+
   /admin/callbacks/{id}/retry:
     post:
       tags: [Admin - Callbacks]
@@ -698,6 +746,57 @@ paths:
         - { name: processed, in: query, schema: { type: string, enum: ['yes', 'no'] } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PaginatedLogs' } } } }
+
+  /admin/logs/stats:
+    get:
+      tags: [Admin - Logs]
+      summary: Webhook event summary for the admin Logs page
+      description: >
+        Provider webhook events (webhook_events). processed = is_processed;
+        ignored = processing_error is exactly one of the benign messages
+        (webhook not a settlement, duplicate webhook, payment already terminal,
+        provider test event); failed = not ignored and (processing_error is set
+        or status is rejected/failed). ignored and failed are disjoint; an event
+        can be none of them (still received). ignored appears only in the
+        totals. Daily series (processed, failed) covers the last 14 days by
+        created_at.
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Webhook event statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [days, total, processed, failed, ignored, daily, breakdown]
+                properties:
+                  days: { type: integer, example: 14 }
+                  total: { type: integer, format: int64 }
+                  processed: { type: integer, format: int64 }
+                  failed: { type: integer, format: int64 }
+                  ignored: { type: integer, format: int64, description: Benign non-processed events (not failures) }
+                  daily:
+                    type: array
+                    description: Exactly 14 points, oldest first; days without rows are zero
+                    items:
+                      type: object
+                      required: [date, label, processed, failed]
+                      properties:
+                        date: { type: string, example: '2026-11-10' }
+                        label: { type: string, example: '10 Nov' }
+                        processed: { type: integer, format: int64 }
+                        failed: { type: integer, format: int64 }
+                  breakdown:
+                    type: array
+                    description: One entry per status present (empty array when there are no rows)
+                    items:
+                      type: object
+                      required: [status, count]
+                      properties:
+                        status: { type: string }
+                        count: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Failed to load log stats }
 
   /admin/logs/export:
     get:
@@ -752,6 +851,54 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/payouts/stats:
+    get:
+      tags: [Admin - Balances & Payouts]
+      summary: Payout summary for the admin Payouts page
+      description: >
+        Count and total amount (IDR) of payouts per status plus payout requests
+        per day (by requested_at) for the last 14 days (same day bucketing as
+        the dashboard charts).
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Payout statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [days, requested_count, requested_amount, paid_count, paid_amount, rejected_count, rejected_amount, daily, breakdown]
+                properties:
+                  days: { type: integer, example: 14 }
+                  requested_count: { type: integer, format: int64 }
+                  requested_amount: { type: integer, format: int64 }
+                  paid_count: { type: integer, format: int64 }
+                  paid_amount: { type: integer, format: int64 }
+                  rejected_count: { type: integer, format: int64 }
+                  rejected_amount: { type: integer, format: int64 }
+                  daily:
+                    type: array
+                    description: Exactly 14 points, oldest first; days without rows are zero
+                    items:
+                      type: object
+                      required: [date, label, count, amount]
+                      properties:
+                        date: { type: string, example: '2026-11-10' }
+                        label: { type: string, example: '10 Nov' }
+                        count: { type: integer, format: int64 }
+                        amount: { type: integer, format: int64 }
+                  breakdown:
+                    type: array
+                    description: One entry per status present (empty array when there are no rows)
+                    items:
+                      type: object
+                      required: [status, count]
+                      properties:
+                        status: { type: string }
+                        count: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Failed to load payout stats }
 
   /admin/payouts/{id}/pay:
     post:
@@ -1106,6 +1253,48 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
+  /merchant/balance/daily:
+    get:
+      tags: [Merchant Balance & Payouts]
+      summary: Credited and debited ledger amounts per day for the Balance chart
+      description: |
+        For the authenticated merchant only (the merchant always comes from the
+        session). `credited` is the sum of positive ledger entries of the day
+        (payment credits, payout reversals, positive adjustments); `debited` is
+        the absolute value of the sum of negative entries (refunds, payouts,
+        negative adjustments). Days are bucketed by `DATE(created_at)`; days
+        without entries are present with zeros.
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - name: days
+          in: query
+          required: false
+          description: Number of days ending today. Values outside 1..90 are clamped; missing or non-numeric means 14.
+          schema: { type: integer, default: 14, minimum: 1, maximum: 90 }
+      responses:
+        '200':
+          description: Daily ledger movement
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [days, daily]
+                properties:
+                  days: { type: integer, example: 14, description: The effective (clamped) window }
+                  daily:
+                    type: array
+                    description: Exactly `days` points, oldest first
+                    items:
+                      type: object
+                      required: [date, label, credited, debited]
+                      properties:
+                        date: { type: string, example: '2026-11-10' }
+                        label: { type: string, example: '10 Nov' }
+                        credited: { type: integer, format: int64 }
+                        debited: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Failed to load balance chart }
+
   /merchant/ledger:
     get:
       tags: [Merchant Balance & Payouts]
@@ -1206,6 +1395,65 @@ paths:
       responses:
         '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PaymentLinkResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
+
+  /merchant/payment-links/stats:
+    get:
+      tags: [Merchant Payment Links]
+      summary: Summary of this merchant's payment links for the Payment Links page
+      description: |
+        For the authenticated merchant only (the merchant always comes from the
+        session). The whole response is scoped to the requested `environment`: link
+        counts cover only the merchant's links of that environment, and
+        `paid_count`, `paid_amount` and `daily` count payments with status `paid` that were
+        spawned by one of the merchant's links in the requested `environment`
+        (daily by `DATE(paid_at)` for the last 14 days, empty days are zero).
+        Amounts are IDR integers.
+      security: [{ merchantBearer: [] }]
+      parameters:
+        - name: environment
+          in: query
+          required: false
+          description: Payment environment; empty or unknown values mean `production` (same as the other merchant endpoints).
+          schema: { type: string, enum: [sandbox, production], default: production }
+      responses:
+        '200':
+          description: Payment link statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [days, total, active, inactive, fixed, open, paid_count, paid_amount, daily, breakdown]
+                properties:
+                  days: { type: integer, example: 14 }
+                  total: { type: integer, format: int64 }
+                  active: { type: integer, format: int64 }
+                  inactive: { type: integer, format: int64 }
+                  fixed: { type: integer, format: int64 }
+                  open: { type: integer, format: int64 }
+                  paid_count: { type: integer, format: int64 }
+                  paid_amount: { type: integer, format: int64 }
+                  daily:
+                    type: array
+                    description: Exactly 14 points, oldest first; days without paid link payments are zero
+                    items:
+                      type: object
+                      required: [date, label, paid_count, paid_amount]
+                      properties:
+                        date: { type: string, example: '2026-11-10' }
+                        label: { type: string, example: '10 Nov' }
+                        paid_count: { type: integer, format: int64 }
+                        paid_amount: { type: integer, format: int64 }
+                  breakdown:
+                    type: array
+                    description: '`active` / `inactive` link counts; entries with a zero count are omitted (empty array when the merchant has no links)'
+                    items:
+                      type: object
+                      required: [status, count]
+                      properties:
+                        status: { type: string, enum: [active, inactive] }
+                        count: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Failed to load payment link stats }
 
   /merchant/payment-links/{id}:
     get:
@@ -1709,12 +1957,19 @@ components:
     # ---- Merchant ----
     CreateMerchantRequest:
       type: object
-      required: [name, email, business_name]
+      required: [name, email, business_name, password]
       properties:
         name: { type: string }
         email: { type: string, format: email }
         phone: { type: string }
         business_name: { type: string }
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 8
+          maxLength: 72
+          description: Initial password of the merchant owner login account (max 72 bytes). Never returned.
         webhook_url:
           type: string
           nullable: true

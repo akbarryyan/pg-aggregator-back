@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/akbarryyan/pg-aggregator-back/internal/netsafe"
 	"strings"
 	"time"
@@ -12,7 +13,9 @@ import (
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/provider"
 	providerPkg "github.com/akbarryyan/pg-aggregator-back/internal/provider"
 	"github.com/akbarryyan/pg-aggregator-back/internal/repository"
+	"github.com/akbarryyan/pg-aggregator-back/pkg/logger"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // AdminMerchantService owns merchant resource CRUD and merchant-scoped
@@ -24,6 +27,7 @@ import (
 type AdminMerchantService struct {
 	merchantRepo               *repository.MerchantRepository
 	merchantProviderConfigRepo *repository.MerchantProviderConfigRepository
+	merchantUserRepo           *repository.MerchantUserRepository
 	paymentService             *AdminPaymentService
 	providerRegistry           providerRegistry
 }
@@ -31,11 +35,13 @@ type AdminMerchantService struct {
 func NewAdminMerchantService(
 	merchantRepo *repository.MerchantRepository,
 	merchantProviderConfigRepo *repository.MerchantProviderConfigRepository,
+	merchantUserRepo *repository.MerchantUserRepository,
 	paymentService *AdminPaymentService,
 ) *AdminMerchantService {
 	return &AdminMerchantService{
 		merchantRepo:               merchantRepo,
 		merchantProviderConfigRepo: merchantProviderConfigRepo,
+		merchantUserRepo:           merchantUserRepo,
 		paymentService:             paymentService,
 	}
 }
@@ -133,6 +139,19 @@ func (s *AdminMerchantService) CreateMerchant(ctx context.Context, req *merchant
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
+	// Password rules are enforced here (not in CreateMerchantRequest.Validate)
+	// because self-registration builds the same request without a password.
+	switch {
+	case req.Password == "":
+		return nil, merchant.ErrMerchantPasswordRequired
+	case len(req.Password) < 8:
+		return nil, merchant.ErrMerchantPasswordTooShort
+	case len(req.Password) > 72: // bcrypt limit is 72 bytes
+		return nil, merchant.ErrMerchantPasswordTooLong
+	}
+	if s.merchantUserRepo == nil {
+		return nil, errors.New("merchant owner accounts not configured")
+	}
 
 	req.Name = strings.TrimSpace(req.Name)
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
@@ -156,9 +175,39 @@ func (s *AdminMerchantService) CreateMerchant(ctx context.Context, req *merchant
 		return nil, err
 	}
 
+	if _, err := s.merchantUserRepo.GetByEmail(ctx, req.Email); err == nil {
+		return nil, merchant.ErrMerchantAlreadyExists
+	} else if !errors.Is(err, merchant.ErrMerchantUserNotFound) {
+		return nil, err
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash password: %w", err)
+	}
+	// Never keep the plaintext around past this point.
+	req.Password = ""
+
 	created, err := s.merchantRepo.Create(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+
+	_, err = s.merchantUserRepo.Create(ctx, &merchant.User{
+		MerchantID:   created.ID,
+		Name:         req.Name,
+		Email:        req.Email,
+		PasswordHash: string(hash),
+		Role:         "owner",
+		IsActive:     true,
+	})
+	if err != nil {
+		// Detached from request cancellation so the rollback still runs if the
+		// client went away mid-request.
+		if delErr := s.merchantRepo.Delete(context.WithoutCancel(ctx), created.ID); delErr != nil {
+			logger.ErrorfCtx(ctx, "failed to roll back merchant %s after owner account failure: %v", created.ID, delErr)
+		}
+		return nil, fmt.Errorf("failed to create merchant owner account: %w", err)
 	}
 	return merchant.ToMerchantResponse(created), nil
 }
@@ -350,16 +399,12 @@ func (s *AdminMerchantService) Stats(ctx context.Context) (*MerchantStats, error
 // buildMerchantStats turns the repository aggregate into the response,
 // filling every day of the window oldest-first.
 func buildMerchantStats(raw *repository.MerchantStats, days int, now time.Time) *MerchantStats {
-	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).
-		AddDate(0, 0, -(days - 1))
 	daily := make([]MerchantSignupPoint, 0, days)
-	for i := 0; i < days; i++ {
-		d := start.AddDate(0, 0, i)
-		key := d.Format("2006-01-02")
+	for _, d := range statsWindow(days, now) {
 		daily = append(daily, MerchantSignupPoint{
-			Date:  key,
-			Label: d.Format("02 Jan"),
-			Count: raw.SignupsByDay[key],
+			Date:  d.Key,
+			Label: d.Label,
+			Count: raw.SignupsByDay[d.Key],
 		})
 	}
 	return &MerchantStats{

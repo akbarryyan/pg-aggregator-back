@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +25,8 @@ type routeCase struct{ method, path, body string }
 func merchantBalanceRoutes() []routeCase {
 	return []routeCase{
 		{http.MethodGet, apiBase + "/merchant/balance", ""},
+		{http.MethodGet, apiBase + "/merchant/balance/daily", ""},
+		{http.MethodGet, apiBase + "/merchant/payment-links/stats", ""},
 		{http.MethodGet, apiBase + "/merchant/ledger", ""},
 		{http.MethodPut, apiBase + "/merchant/payout-account", `{"password":"x"}`},
 		{http.MethodPost, apiBase + "/merchant/payouts", `{"amount":60000}`},
@@ -36,6 +40,9 @@ func adminPayoutRoutes() []routeCase {
 		{http.MethodGet, apiBase + "/admin/balances", ""},
 		{http.MethodGet, apiBase + "/admin/merchants/stats", ""},
 		{http.MethodGet, apiBase + "/admin/payouts", ""},
+		{http.MethodGet, apiBase + "/admin/payouts/stats", ""},
+		{http.MethodGet, apiBase + "/admin/callbacks/stats", ""},
+		{http.MethodGet, apiBase + "/admin/logs/stats", ""},
 		{http.MethodPost, apiBase + "/admin/payouts/" + id + "/pay", `{"reference":"x"}`},
 		{http.MethodPost, apiBase + "/admin/payouts/" + id + "/reject", `{"reason":"x"}`},
 		{http.MethodGet, apiBase + "/admin/merchants/" + id + "/ledger", ""},
@@ -167,5 +174,133 @@ func TestRouter_BalanceRoutes_ReachHandlers(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// Positive wiring of the merchant page stats: "/payment-links/stats" must reach
+// the stats handler (not "/payment-links/{id}" with id "stats") and
+// "/balance/daily" its handler, both scoped to the session's merchant.
+func TestRouter_MerchantPageStatsRoutes_ReachHandlers(t *testing.T) {
+	e := newSessEnv(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ledgerRepo, payoutRepo, merchantRepo := repository.NewLedgerRepository(db), repository.NewPayoutRepository(db), repository.NewMerchantRepository(db)
+	balanceSvc := service.NewBalanceService(ledgerRepo, merchantRepo, payoutRepo, 50000).WithDaily(ledgerRepo)
+	payoutSvc := service.NewPayoutService(payoutRepo, merchantRepo, 50000)
+	linkRepo := repository.NewPaymentLinkRepository(db)
+	linkHandler := handler.NewPaymentLinkHandler(service.NewPaymentLinkService(linkRepo, nil, nil).WithStats(linkRepo), "http://localhost:3000")
+	merchantHandler := handler.NewMerchantHandler(nil, nil, e.authSvc, "http://localhost:3000").WithBalanceServices(balanceSvc, payoutSvc)
+	limiter := middleware.NewIPRateLimiter(1000, 1000)
+	router := setupRouter(nil, nil, handler.NewAuthHandler(e.authSvc), handler.NewAdminHandler(nil, "http://localhost:3000"), merchantHandler, linkHandler,
+		middleware.NewAuthMiddleware(e.authSvc), nil, limiter, limiter, limiter, limiter,
+		func(context.Context) error { return nil })
+	tok := e.merchantToken(t, time.Now().UTC())
+
+	mock.ExpectQuery(`FROM payment_links\s+WHERE merchant_id = \$1 AND environment = \$2`).WithArgs(e.merchant.ID, "sandbox").
+		WillReturnRows(sqlmock.NewRows([]string{"a", "b", "c", "d"}).AddRow(3, 2, 1, 2))
+	mock.ExpectQuery(`FROM payments\s+WHERE merchant_id = \$1 AND payment_link_id IS NOT NULL\s+AND status = 'paid' AND environment = \$2\s*$`).
+		WithArgs(e.merchant.ID, "sandbox").WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(0, 0))
+	mock.ExpectQuery(`DATE\(paid_at\)`).WithArgs(e.merchant.ID, "sandbox", 14).
+		WillReturnRows(sqlmock.NewRows([]string{"day", "n", "s"}))
+	code := serveFrom(router, http.MethodGet, apiBase+"/merchant/payment-links/stats?environment=sandbox", tok)
+	if code != http.StatusOK {
+		t.Fatalf("payment-links/stats = %d, want 200 (route order: stats before {id})", code)
+	}
+
+	mock.ExpectQuery(`FROM merchant_ledger\s+WHERE merchant_id = \$1`).WithArgs(e.merchant.ID, 7).
+		WillReturnRows(sqlmock.NewRows([]string{"day", "c", "d"}))
+	if code = serveFrom(router, http.MethodGet, apiBase+"/merchant/balance/daily?days=7", tok); code != http.StatusOK {
+		t.Fatalf("balance/daily = %d, want 200", code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// Registration ORDER of the admin stats routes: gorilla/mux matches in
+// registration order and the auth middleware runs after matching, so only a
+// real request with an admin token proves "/x/stats" is not captured by
+// "/x/{id}" (which would answer 400/404 from the id handlers instead of 200).
+func TestRouter_AdminStatsRoutes_ReachHandlers(t *testing.T) {
+	e := newSessEnv(t)
+	newMock := func() (*sql.DB, sqlmock.Sqlmock) {
+		db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db, mock
+	}
+	mDB, mMock := newMock()
+	cDB, cMock := newMock()
+	lDB, lMock := newMock()
+	pDB, pMock := newMock()
+
+	merchantRepo := repository.NewMerchantRepository(mDB)
+	adminHandler := handler.NewAdminHandler(nil, "http://localhost:3000").
+		WithMerchantAndPaymentServices(nil, service.NewAdminMerchantService(merchantRepo, nil, nil, nil)).
+		WithReportingServices(nil, nil,
+			service.NewAdminLogService(nil, repository.NewWebhookEventRepository(lDB)),
+			service.NewAdminCallbackService(repository.NewMerchantCallbackRepository(cDB))).
+		WithPayoutServices(service.NewBalanceService(nil, nil, nil, 50000),
+			service.NewPayoutService(repository.NewPayoutRepository(pDB), merchantRepo, 50000))
+	limiter := middleware.NewIPRateLimiter(1000, 1000)
+	router := setupRouter(nil, nil, handler.NewAuthHandler(e.authSvc), adminHandler,
+		handler.NewMerchantHandler(nil, nil, e.authSvc, "http://localhost:3000"), nil,
+		middleware.NewAuthMiddleware(e.authSvc), nil, limiter, limiter, limiter, limiter,
+		func(context.Context) error { return nil })
+	tok := e.adminToken(t, time.Now().UTC())
+	serve := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, apiBase+path, nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	wantKeys := func(path string, rec *httptest.ResponseRecorder, keys ...string) {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d %s, want 200 from the stats handler (route order: stats before {id})", path, rec.Code, rec.Body.String())
+		}
+		for _, k := range append(keys, `"days":14`) {
+			if !strings.Contains(rec.Body.String(), k) {
+				t.Errorf("%s body lacks %s: %s", path, k, rec.Body.String())
+			}
+		}
+	}
+
+	mMock.ExpectQuery(`FROM merchants`).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(2, 1))
+	mMock.ExpectQuery(`WITH b AS`).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(0, 0))
+	mMock.ExpectQuery(`GROUP BY day`).WillReturnRows(sqlmock.NewRows([]string{"day", "n"}))
+	wantKeys("/admin/merchants/stats", serve("/admin/merchants/stats"), `"total":2`, `"signups_daily":[`)
+
+	cMock.ExpectQuery(`GROUP BY status`).WillReturnRows(sqlmock.NewRows([]string{"s", "n"}))
+	cMock.ExpectQuery(`GROUP BY day`).WillReturnRows(sqlmock.NewRows([]string{"d", "s", "f", "o"}))
+	wantKeys("/admin/callbacks/stats", serve("/admin/callbacks/stats"), `"breakdown":[]`, `"daily":[`)
+
+	lMock.ExpectQuery(`GROUP BY status`).WillReturnRows(sqlmock.NewRows([]string{"s", "n", "p", "f", "i"}))
+	lMock.ExpectQuery(`GROUP BY day`).WillReturnRows(sqlmock.NewRows([]string{"d", "p", "f"}))
+	wantKeys("/admin/logs/stats", serve("/admin/logs/stats"), `"processed":0`, `"breakdown":[]`, `"daily":[`)
+
+	pMock.ExpectQuery(`GROUP BY status`).WillReturnRows(sqlmock.NewRows([]string{"s", "n", "a"}))
+	pMock.ExpectQuery(`GROUP BY day`).WillReturnRows(sqlmock.NewRows([]string{"d", "n", "a"}))
+	wantKeys("/admin/payouts/stats", serve("/admin/payouts/stats"), `"requested_count":0`, `"breakdown":[]`, `"daily":[`)
+
+	// "/logs/export" is not shadowed by the stats route or "/logs/{id}": it
+	// reaches ExportLogs (here failing on the mocked DB with its own generic
+	// 500), never GetLog's 400 "Invalid log ID".
+	lMock.ExpectQuery(`.*`).WillReturnError(errors.New("boom"))
+	rec := serve("/admin/logs/export")
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "Failed to export logs") {
+		t.Fatalf("/admin/logs/export = %d %s, want ExportLogs' 500", rec.Code, rec.Body.String())
+	}
+
+	for name, m := range map[string]sqlmock.Sqlmock{"merchants": mMock, "callbacks": cMock, "logs": lMock, "payouts": pMock} {
+		if err := m.ExpectationsWereMet(); err != nil {
+			t.Errorf("%s unmet expectations: %v", name, err)
+		}
 	}
 }

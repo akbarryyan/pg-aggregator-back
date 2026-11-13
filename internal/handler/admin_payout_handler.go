@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/akbarryyan/pg-aggregator-back/internal/activity"
 	"net/http"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/ledger"
@@ -119,6 +120,7 @@ func (h *AdminHandler) processPayout(
 	switch {
 	case err == nil:
 		logger.InfofCtx(r.Context(), "admin %s %s payout %s merchant %s amount %d", adminID, verb, p.ID, p.MerchantID, p.Amount)
+		activity.AddDetails(r.Context(), map[string]interface{}{"amount": p.Amount, field: text})
 		respondJSON(w, http.StatusOK, p)
 	case errors.Is(err, ledger.ErrReasonRequired):
 		respondError(w, http.StatusBadRequest, "A "+field+" is required")

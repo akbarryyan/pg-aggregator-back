@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/activity"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/admin"
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/merchant"
 	"github.com/akbarryyan/pg-aggregator-back/internal/service"
@@ -29,6 +30,7 @@ func (h *AuthHandler) LoginAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.Email = strings.TrimSpace(req.Email)
+	activity.AddDetails(r.Context(), map[string]interface{}{"email": req.Email})
 
 	resp, err := h.authService.LoginAdmin(r.Context(), &req)
 	if err != nil {
@@ -46,6 +48,10 @@ func (h *AuthHandler) LoginAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if resp.Admin != nil {
+		id := resp.Admin.ID
+		activity.SetActor(r.Context(), activity.ActorAdmin, &id, resp.Admin.Email, nil)
+	}
 	respondJSON(w, http.StatusOK, resp)
 }
 
@@ -181,6 +187,8 @@ func (h *AuthHandler) RegisterMerchant(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	mid := resp.ID
+	activity.SetActor(r.Context(), activity.ActorMerchantUser, nil, resp.Email, &mid)
 	respondJSON(w, http.StatusCreated, resp)
 }
 
@@ -191,6 +199,7 @@ func (h *AuthHandler) LoginMerchant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Email = strings.TrimSpace(req.Email)
+	activity.AddDetails(r.Context(), map[string]interface{}{"email": req.Email})
 
 	resp, err := h.authService.LoginMerchant(r.Context(), &req)
 	if err != nil {
@@ -206,6 +215,10 @@ func (h *AuthHandler) LoginMerchant(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, "Failed to sign in")
 		}
 		return
+	}
+	if resp.User != nil {
+		id, mid := resp.User.ID, resp.User.MerchantID
+		activity.SetActor(r.Context(), activity.ActorMerchantUser, &id, resp.User.Email, &mid)
 	}
 	respondJSON(w, http.StatusOK, resp)
 }
@@ -307,6 +320,8 @@ func (h *AuthHandler) authenticateMerchant(w http.ResponseWriter, r *http.Reques
 		}
 		return nil, false
 	}
+	mid := claims.MerchantID
+	activity.SetActor(r.Context(), activity.ActorMerchantUser, &claims.UserID, claims.Email, &mid)
 	return claims, true
 }
 
@@ -339,6 +354,9 @@ func (h *AuthHandler) authenticateAdmin(w http.ResponseWriter, r *http.Request) 
 		return nil, false
 	}
 
+	// Handler-authenticated routes have no context ids: tell the activity log
+	// who this is now that the session is valid.
+	activity.SetActor(r.Context(), activity.ActorAdmin, &claims.AdminID, claims.Email, nil)
 	return claims, true
 }
 

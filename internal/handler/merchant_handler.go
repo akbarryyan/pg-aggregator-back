@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/akbarryyan/pg-aggregator-back/internal/activity"
 	"net/http"
 	"strconv"
 	"strings"
@@ -395,6 +396,7 @@ func (h *MerchantHandler) UpsertAPIKey(w http.ResponseWriter, r *http.Request) {
 	if result.Rotated {
 		status = http.StatusOK
 	}
+	activity.AddDetails(r.Context(), apiKeyDetails(result))
 	respondJSON(w, status, result)
 }
 
@@ -431,6 +433,7 @@ func (h *MerchantHandler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "Failed to delete API key")
 		return
 	}
+	activity.AddDetails(r.Context(), map[string]interface{}{"key_id": keyID.String()})
 	respondJSON(w, http.StatusOK, map[string]string{"message": "API key deleted"})
 }
 
@@ -534,5 +537,6 @@ func (h *MerchantHandler) RegenerateWebhookSecret(w http.ResponseWriter, r *http
 		respondError(w, http.StatusInternalServerError, "Failed to regenerate webhook secret")
 		return
 	}
+	activity.AddDetails(r.Context(), map[string]interface{}{"regenerated": true})
 	respondJSON(w, http.StatusOK, map[string]string{"webhook_secret": secret})
 }

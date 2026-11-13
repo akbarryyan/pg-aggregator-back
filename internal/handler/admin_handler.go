@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/akbarryyan/pg-aggregator-back/internal/activity"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ type AdminHandler struct {
 	balanceService           adminBalanceAPI
 	payoutService            adminPayoutAPI
 	refundService            adminRefundAPI
+	activityLogService       *service.ActivityLogService
 	frontendURL              string
 }
 
@@ -364,6 +366,7 @@ func (h *AdminHandler) CreateMerchant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	activity.AddDetails(r.Context(), map[string]interface{}{"email": req.Email, "business_name": req.BusinessName})
 	respondJSON(w, http.StatusCreated, created)
 }
 
@@ -473,6 +476,7 @@ func (h *AdminHandler) UpdateMerchant(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	activity.AddDetails(r.Context(), map[string]interface{}{"fields": updatedMerchantFields(&req)})
 	respondJSON(w, http.StatusOK, m)
 }
 
@@ -501,6 +505,7 @@ func (h *AdminHandler) SetMerchantActive(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusInternalServerError, "Failed to update merchant status")
 		return
 	}
+	activity.AddDetails(r.Context(), map[string]interface{}{"is_active": body.IsActive})
 	respondJSON(w, http.StatusOK, m)
 }
 
@@ -526,6 +531,8 @@ func (h *AdminHandler) SetMerchantFeeBearer(w http.ResponseWriter, r *http.Reque
 		// table, so leave a trail in the log.
 		adminID, _ := middleware.AdminIDFromContext(r.Context())
 		logger.InfofCtx(r.Context(), "admin %s set merchant %s fee_bearer=%s", adminID, id, m.FeeBearer)
+		// The service does not expose the previous value, so only the new one is recorded.
+		activity.AddDetails(r.Context(), map[string]interface{}{"to": m.FeeBearer})
 		respondJSON(w, http.StatusOK, m)
 	case errors.Is(err, merchant.ErrInvalidFeeBearer):
 		respondError(w, http.StatusBadRequest, err.Error())
@@ -884,6 +891,7 @@ func (h *AdminHandler) UpsertMerchantAPIKey(w http.ResponseWriter, r *http.Reque
 	if result.Rotated {
 		status = http.StatusOK
 	}
+	activity.AddDetails(r.Context(), apiKeyDetails(result))
 	respondJSON(w, status, result)
 }
 
@@ -935,6 +943,7 @@ func (h *AdminHandler) DeleteMerchantAPIKey(w http.ResponseWriter, r *http.Reque
 		}
 		return
 	}
+	activity.AddDetails(r.Context(), map[string]interface{}{"key_id": keyID.String()})
 	respondJSON(w, http.StatusOK, map[string]string{"message": "API key deleted"})
 }
 

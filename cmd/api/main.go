@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/akbarryyan/pg-aggregator-back/internal/activity"
 	"github.com/akbarryyan/pg-aggregator-back/internal/config"
 	"github.com/akbarryyan/pg-aggregator-back/internal/handler"
 	"github.com/akbarryyan/pg-aggregator-back/internal/middleware"
@@ -76,6 +77,9 @@ func main() {
 	ledgerRepo := repository.NewLedgerRepository(db)
 	refundRepo := repository.NewRefundRepository(db)
 	payoutRepo := repository.NewPayoutRepository(db)
+	activityRepo := repository.NewActivityLogRepository(db)
+	activityRecorder := activity.NewRecorder(activityRepo, 1024)
+	activityLookup := newEmailLookup(adminRepo, merchantUserRepo)
 	cashiAdapter := cashi.NewCashiAdapter(
 		cfg.Cashi.BaseURL,
 		cfg.Cashi.APIKey,
@@ -125,7 +129,8 @@ func main() {
 		WithProviderService(adminProviderService).
 		WithReportingServices(adminDashboardService, adminNotificationService, adminLogService, adminCallbackService).
 		WithPayoutServices(balanceService, payoutService).
-		WithRefundService(refundService)
+		WithRefundService(refundService).
+		WithActivityLogs(service.NewActivityLogService(activityRepo))
 	merchantHandler := handler.NewMerchantHandler(paymentService, apiKeyService, authService, cfg.App.FrontendURL).
 		WithMerchantAndPaymentServices(adminPaymentService, adminMerchantService).
 		WithReportingServices(adminDashboardService, adminNotificationService, adminCallbackService).
@@ -180,6 +185,13 @@ func main() {
 	startJob(time.Hour, "purge-idempotency-keys", paymentService.PurgeIdempotencyKeys)
 	startJob(service.CallbackDeliveryInterval, "deliver-merchant-callbacks", paymentService.DeliverMerchantCallbacks)
 	startJob(service.ReconcileInterval, "reconcile-payments", paymentService.ReconcileRecentPayments)
+	startJob(24*time.Hour, "purge-activity-logs", func(ctx context.Context) error {
+		n, err := activityRepo.PurgeOlderThan(ctx, time.Now().AddDate(0, 0, -activityRetentionDays), 5000)
+		if n > 0 {
+			logger.Infof("purge-activity-logs: deleted %d entries older than %d days", n, activityRetentionDays)
+		}
+		return err
+	})
 	startJob(10*time.Minute, "rate-limiter-cleanup", func(ctx context.Context) error {
 		authRateLimiter.Cleanup(30 * time.Minute)
 		publicRateLimiter.Cleanup(30 * time.Minute)
@@ -188,15 +200,10 @@ func main() {
 		return nil
 	})
 
-	router := setupRouter(paymentHandler, webhookHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter, db.PingContext)
+	router := setupRouter(paymentHandler, webhookHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter, db.PingContext,
+		withActivity(activityRecorder, activityLookup, trustedProxies))
 
-	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{cfg.App.FrontendURL},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key", "Idempotency-Key"},
-		ExposedHeaders:   []string{"Idempotent-Replayed"},
-		AllowCredentials: true,
-	})
+	c := cors.New(corsOptions(cfg.App.FrontendURL))
 
 	// 1 MiB cap on every request body.
 	handler := middleware.LimitBody(1 << 20)(c.Handler(router))
@@ -238,6 +245,11 @@ func main() {
 		logger.Warnf("Background jobs did not finish within 15s; unsent callbacks will be re-claimed after restart")
 	}
 
+	// Flush queued activity entries once no handler can produce more.
+	if err := activityRecorder.Close(ctx); err != nil {
+		logger.Warnf("Activity log recorder did not flush in time: %v", err)
+	}
+
 	logger.Info("Server exited")
 }
 
@@ -272,6 +284,31 @@ func newRateLimiter(rule config.RateLimitRule, trustedProxies []netip.Prefix) *m
 		WithTrustedProxies(trustedProxies)
 }
 
+// activityRetentionDays is how long activity log entries are kept.
+const activityRetentionDays = 90
+
+type routerOptions struct {
+	activityMW func(http.Handler) http.Handler
+	// activityActorMW records only requests whose actor resolved (no
+	// anonymous entries); used on every auth route except the two logins.
+	activityActorMW func(http.Handler) http.Handler
+}
+
+// routerOption customises setupRouter without changing its core signature.
+type routerOption func(*routerOptions)
+
+// withActivity records admin, merchant-dashboard and auth-endpoint requests in
+// the activity log. API-key, public, webhook and health routes are never
+// recorded.
+func withActivity(rec *activity.Recorder, lookup activity.EmailLookup, trusted []netip.Prefix) routerOption {
+	return func(o *routerOptions) {
+		if rec != nil {
+			o.activityMW = activity.Middleware(rec, lookup, trusted)
+			o.activityActorMW = activity.MiddlewareActorOnly(rec, lookup, trusted)
+		}
+	}
+}
+
 func setupRouter(
 	paymentHandler *handler.PaymentHandler,
 	webhookHandler *handler.WebhookHandler,
@@ -286,29 +323,72 @@ func setupRouter(
 	sensitiveRateLimiter *middleware.IPRateLimiter,
 	apiRateLimiter *middleware.IPRateLimiter,
 	healthCheck func(context.Context) error,
+	opts ...routerOption,
 ) http.Handler {
+	// Wraps the whole router (not mux.Router.Use, which gorilla/mux does
+	// NOT run for unmatched routes) so every response — including a 404 for
+	// an unknown path — carries a correlation ID (project backlog #10).
+	return middleware.RequestID(newRouter(paymentHandler, webhookHandler, authHandler, adminHandler, merchantHandler, paymentLinkHandler, authMiddleware, merchantAPIAuth, authRateLimiter, publicRateLimiter, sensitiveRateLimiter, apiRateLimiter, healthCheck, opts...))
+}
+
+func newRouter(
+	paymentHandler *handler.PaymentHandler,
+	webhookHandler *handler.WebhookHandler,
+	authHandler *handler.AuthHandler,
+	adminHandler *handler.AdminHandler,
+	merchantHandler *handler.MerchantHandler,
+	paymentLinkHandler *handler.PaymentLinkHandler,
+	authMiddleware *middleware.AuthMiddleware,
+	merchantAPIAuth *middleware.MerchantAPIAuthMiddleware,
+	authRateLimiter *middleware.IPRateLimiter,
+	publicRateLimiter *middleware.IPRateLimiter,
+	sensitiveRateLimiter *middleware.IPRateLimiter,
+	apiRateLimiter *middleware.IPRateLimiter,
+	healthCheck func(context.Context) error,
+	opts ...routerOption,
+) *mux.Router {
+	var ro routerOptions
+	for _, o := range opts {
+		o(&ro)
+	}
+	// act wraps an auth endpoint handler; identity there is only known inside
+	// the handler (it sets the actor itself), so it goes inside the limiter.
+	act := func(h http.HandlerFunc) http.Handler {
+		if ro.activityActorMW == nil {
+			return h
+		}
+		return ro.activityActorMW(h)
+	}
+	// actLogin is the only wrapper that may record anonymous (failed login).
+	actLogin := func(h http.HandlerFunc) http.Handler {
+		if ro.activityMW == nil {
+			return h
+		}
+		return ro.activityMW(h)
+	}
+
 	r := mux.NewRouter()
 
 	api := r.PathPrefix("/api/v1").Subrouter()
 
 	// Merchant dashboard login (public) — rate limited, classic brute-force target.
-	api.Handle("/auth/login", authRateLimiter.Limit(http.HandlerFunc(authHandler.LoginMerchant))).Methods("POST")
-	api.Handle("/auth/register", authRateLimiter.Limit(http.HandlerFunc(authHandler.RegisterMerchant))).Methods("POST")
+	api.Handle("/auth/login", authRateLimiter.Limit(actLogin(authHandler.LoginMerchant))).Methods("POST")
+	api.Handle("/auth/register", authRateLimiter.Limit(act(authHandler.RegisterMerchant))).Methods("POST")
 	// Handler-authenticated account routes cost 1-2 DB queries per request, so
 	// they share the per-IP api bucket (spec 3.5) instead of staying unlimited.
-	api.Handle("/auth/logout", apiRateLimiter.Limit(http.HandlerFunc(authHandler.LogoutMerchant))).Methods("POST")
-	api.Handle("/auth/me", apiRateLimiter.Limit(http.HandlerFunc(authHandler.GetMerchantMe))).Methods("GET")
-	api.Handle("/auth/profile", apiRateLimiter.Limit(http.HandlerFunc(authHandler.UpdateMerchantProfile))).Methods("PUT")
+	api.Handle("/auth/logout", apiRateLimiter.Limit(act(authHandler.LogoutMerchant))).Methods("POST")
+	api.Handle("/auth/me", apiRateLimiter.Limit(act(authHandler.GetMerchantMe))).Methods("GET")
+	api.Handle("/auth/profile", apiRateLimiter.Limit(act(authHandler.UpdateMerchantProfile))).Methods("PUT")
 	// change-password is auth-gated (JWT parsed inside the handler) but was
 	// previously unlimited — a leaked/stolen token could hammer it with no
 	// throttling at all.
-	api.Handle("/auth/change-password", sensitiveRateLimiter.Limit(http.HandlerFunc(authHandler.ChangeMerchantPassword))).Methods("POST")
+	api.Handle("/auth/change-password", sensitiveRateLimiter.Limit(act(authHandler.ChangeMerchantPassword))).Methods("POST")
 
-	api.Handle("/auth/admin/login", authRateLimiter.Limit(http.HandlerFunc(authHandler.LoginAdmin))).Methods("POST")
-	api.Handle("/auth/admin/logout", apiRateLimiter.Limit(http.HandlerFunc(authHandler.LogoutAdmin))).Methods("POST")
-	api.Handle("/auth/admin/me", apiRateLimiter.Limit(http.HandlerFunc(authHandler.GetMe))).Methods("GET")
-	api.Handle("/auth/admin/profile", apiRateLimiter.Limit(http.HandlerFunc(authHandler.UpdateProfile))).Methods("PUT")
-	api.Handle("/auth/admin/change-password", sensitiveRateLimiter.Limit(http.HandlerFunc(authHandler.ChangePassword))).Methods("POST")
+	api.Handle("/auth/admin/login", authRateLimiter.Limit(actLogin(authHandler.LoginAdmin))).Methods("POST")
+	api.Handle("/auth/admin/logout", apiRateLimiter.Limit(act(authHandler.LogoutAdmin))).Methods("POST")
+	api.Handle("/auth/admin/me", apiRateLimiter.Limit(act(authHandler.GetMe))).Methods("GET")
+	api.Handle("/auth/admin/profile", apiRateLimiter.Limit(act(authHandler.UpdateProfile))).Methods("PUT")
+	api.Handle("/auth/admin/change-password", sensitiveRateLimiter.Limit(act(authHandler.ChangePassword))).Methods("POST")
 
 	// Protected admin panel APIs
 	adminAPI := api.PathPrefix("/admin").Subrouter()
@@ -316,6 +396,11 @@ func setupRouter(
 	// check so forged tokens can't be used to hammer the database.
 	adminAPI.Use(apiRateLimiter.Limit)
 	adminAPI.Use(authMiddleware.RequireAdmin)
+	// After auth so the identity is in the context; recorded for every
+	// authenticated admin request.
+	if ro.activityMW != nil {
+		adminAPI.Use(ro.activityMW)
+	}
 	adminAPI.HandleFunc("/dashboard/summary", adminHandler.GetDashboardSummary).Methods("GET")
 	adminAPI.HandleFunc("/dashboard/charts", adminHandler.GetDashboardCharts).Methods("GET")
 	adminAPI.HandleFunc("/payments", adminHandler.ListPayments).Methods("GET")
@@ -359,6 +444,10 @@ func setupRouter(
 	adminAPI.HandleFunc("/logs/stats", adminHandler.GetLogStats).Methods("GET")
 	adminAPI.HandleFunc("/logs/export", adminHandler.ExportLogs).Methods("GET")
 	adminAPI.HandleFunc("/logs/{id}", adminHandler.GetLog).Methods("GET")
+	// Admin activity log; stats/export are literal paths, no {id} route exists.
+	adminAPI.HandleFunc("/activity-logs", adminHandler.ListActivityLogs).Methods("GET")
+	adminAPI.HandleFunc("/activity-logs/stats", adminHandler.GetActivityLogStats).Methods("GET")
+	adminAPI.HandleFunc("/activity-logs/export", adminHandler.ExportActivityLogs).Methods("GET")
 	// Merchant balances and payouts (admin side; see the limiter note below).
 	adminAPI.HandleFunc("/balances", adminHandler.ListBalances).Methods("GET")
 	adminAPI.HandleFunc("/merchants/{id}/ledger", adminHandler.ListMerchantLedger).Methods("GET")
@@ -378,6 +467,9 @@ func setupRouter(
 	merchantDash := api.PathPrefix("/merchant").Subrouter()
 	merchantDash.Use(apiRateLimiter.Limit)
 	merchantDash.Use(authMiddleware.RequireMerchant)
+	if ro.activityMW != nil {
+		merchantDash.Use(ro.activityMW)
+	}
 	merchantDash.HandleFunc("/dashboard/summary", merchantHandler.GetDashboardSummary).Methods("GET")
 	merchantDash.HandleFunc("/dashboard/charts", merchantHandler.GetDashboardCharts).Methods("GET")
 	merchantDash.HandleFunc("/notifications", merchantHandler.ListNotifications).Methods("GET")
@@ -442,8 +534,17 @@ func setupRouter(
 	// since it costs a DB round trip.
 	api.Handle("/health", publicRateLimiter.Limit(newHealthHandler(healthCheck))).Methods("GET")
 
-	// Wraps the whole router (not mux.Router.Use, which gorilla/mux does
-	// NOT run for unmatched routes) so every response — including a 404 for
-	// an unknown path — carries a correlation ID (project backlog #10).
-	return middleware.RequestID(r)
+	return r
+}
+
+// corsOptions is the CORS policy for the browser front-end. X-Background-Request
+// must be allowed or polling requests carrying it fail their preflight.
+func corsOptions(frontendURL string) cors.Options {
+	return cors.Options{
+		AllowedOrigins:   []string{frontendURL},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key", "Idempotency-Key", "X-Background-Request"},
+		ExposedHeaders:   []string{"Idempotent-Replayed"},
+		AllowCredentials: true,
+	}
 }

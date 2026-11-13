@@ -733,6 +733,99 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
 
   # ---------------------------------------------------------------- Admin - Logs
+  /admin/activity-logs:
+    get:
+      tags: [Admin - Activity Log]
+      summary: List activity log entries (admin, merchant dashboard and auth actions)
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: search, in: query, description: Matches actor email, action or target id, schema: { type: string } }
+        - { name: actor_type, in: query, schema: { type: string, enum: [admin, merchant_user, anonymous] } }
+        - { name: merchant_id, in: query, schema: { type: string, format: uuid } }
+        - { name: result, in: query, schema: { type: string, enum: [success, failed] } }
+        - { name: date_from, in: query, schema: { type: string, format: date } }
+        - { name: date_to, in: query, description: Inclusive, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, limit, offset]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ActivityLogEntry' } }
+                  total: { type: integer, format: int64 }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        '400': { description: Invalid filter }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Failed to list activity logs }
+
+  /admin/activity-logs/stats:
+    get:
+      tags: [Admin - Activity Log]
+      summary: Activity summary for the last 14 days
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Activity statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [days, total, failed_logins, active_actors, daily, breakdown]
+                properties:
+                  days: { type: integer, example: 14 }
+                  total: { type: integer, format: int64 }
+                  failed_logins: { type: integer, format: int64, description: Entries with actor_type anonymous }
+                  active_actors: { type: integer, format: int64, description: Distinct signed-in actors }
+                  daily:
+                    type: array
+                    description: Exactly 14 points, oldest first; days without rows are zero
+                    items:
+                      type: object
+                      required: [date, label, admin, merchant]
+                      properties:
+                        date: { type: string, example: '2026-11-10' }
+                        label: { type: string, example: '10 Nov' }
+                        admin: { type: integer, format: int64 }
+                        merchant: { type: integer, format: int64, description: merchant_user plus anonymous }
+                  breakdown:
+                    type: array
+                    description: Top 6 actions plus an Other row when more exist
+                    items:
+                      type: object
+                      required: [action, count]
+                      properties:
+                        action: { type: string }
+                        count: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Failed to load activity log stats }
+
+  /admin/activity-logs/export:
+    get:
+      tags: [Admin - Activity Log]
+      summary: Export activity log entries as CSV (max 5000 rows)
+      description: >
+        Same filters as the list. Columns: time, actor_type, actor_email,
+        merchant_id, action, method, route, target_id, status_code, ip,
+        user_agent, duration_ms, details (compact JSON).
+      security: [{ adminBearer: [] }]
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: actor_type, in: query, schema: { type: string, enum: [admin, merchant_user, anonymous] } }
+        - { name: merchant_id, in: query, schema: { type: string, format: uuid } }
+        - { name: result, in: query, schema: { type: string, enum: [success, failed] } }
+        - { name: date_from, in: query, schema: { type: string, format: date } }
+        - { name: date_to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200': { description: CSV file, content: { text/csv: { schema: { type: string, format: binary } } } }
+        '400': { description: Invalid filter }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /admin/logs:
     get:
       tags: [Admin - Logs]
@@ -2268,6 +2361,25 @@ components:
         total: { type: integer }
 
     # ---- Logs ----
+    ActivityLogEntry:
+      type: object
+      required: [id, created_at, actor_type, actor_email, action, method, route, target_id, status_code, ip, user_agent, duration_ms, details]
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        actor_type: { type: string, enum: [admin, merchant_user, anonymous] }
+        actor_id: { type: string, format: uuid, description: Omitted when unknown }
+        actor_email: { type: string }
+        merchant_id: { type: string, format: uuid, description: Omitted when not a merchant action }
+        action: { type: string, example: Viewed payments }
+        method: { type: string }
+        route: { type: string }
+        target_id: { type: string }
+        status_code: { type: integer }
+        ip: { type: string }
+        user_agent: { type: string }
+        duration_ms: { type: integer }
+        details: { type: object, additionalProperties: true }
     AdminLogItem:
       type: object
       properties:

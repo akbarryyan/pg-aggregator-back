@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/akbarryyan/pg-aggregator-back/internal/requestctx"
 	"net/http"
 	"strings"
 
@@ -14,10 +15,10 @@ import (
 	"github.com/google/uuid"
 )
 
-type contextKey string
+type contextKey = requestctx.Key
 
-const AdminIDContextKey contextKey = "admin_id"
-const MerchantUserIDContextKey contextKey = "merchant_user_id"
+const AdminIDContextKey = requestctx.AdminIDKey
+const MerchantUserIDContextKey = requestctx.MerchantUserIDKey
 
 type AuthMiddleware struct {
 	authService *service.AuthService

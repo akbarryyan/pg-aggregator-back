@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/akbarryyan/pg-aggregator-back/internal/activity"
 	"net/http"
 
 	"github.com/akbarryyan/pg-aggregator-back/internal/domain/ledger"
@@ -62,6 +63,7 @@ func (h *AdminHandler) RefundPayment(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		logger.InfofCtx(r.Context(), "admin %s refunded payment %s merchant %s amount %d full=%t",
 			adminID, id, res.Refund.MerchantID, res.Refund.Amount, res.Full)
+		activity.AddDetails(r.Context(), map[string]interface{}{"amount": res.Refund.Amount, "reason": req.Reason})
 		respondJSON(w, http.StatusCreated, refundResponse{
 			Refund: res.Refund, PaymentStatus: res.PaymentStatus, RemainingRefundable: res.RemainingRefundable,
 		})
@@ -106,6 +108,7 @@ func (h *AdminHandler) AdjustMerchantBalance(w http.ResponseWriter, r *http.Requ
 	switch {
 	case err == nil:
 		logger.InfofCtx(r.Context(), "admin %s adjusted merchant %s balance by %d", adminID, id, entry.Amount)
+		activity.AddDetails(r.Context(), map[string]interface{}{"amount": entry.Amount, "reason": req.Reason})
 		respondJSON(w, http.StatusCreated, entry)
 	case errors.Is(err, ledger.ErrInvalidAdjustment):
 		respondError(w, http.StatusBadRequest, "Amount must be non-zero and within the allowed range")

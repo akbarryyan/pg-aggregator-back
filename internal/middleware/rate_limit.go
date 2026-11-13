@@ -1,10 +1,9 @@
 package middleware
 
 import (
-	"net"
+	"github.com/akbarryyan/pg-aggregator-back/internal/requestctx"
 	"net/http"
 	"net/netip"
-	"strings"
 	"sync"
 	"time"
 )
@@ -101,46 +100,17 @@ func (l *IPRateLimiter) Limit(next http.Handler) http.Handler {
 	})
 }
 
-// clientIP returns the key a request is limited under. The TCP peer address
-// is authoritative unless the peer is a configured trusted proxy: only then
-// is X-Forwarded-For consulted, walked right to left, and the first address
-// that isn't itself a trusted proxy is the client. Entries further left were
-// supplied by the client and could be forged, so they are never used. Any
-// doubt (no header, an unparseable entry, every entry trusted) falls back to
-// the peer address.
+// clientIP returns the key a request is limited under; see ClientIP.
 func (l *IPRateLimiter) clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	peer, err := netip.ParseAddr(host)
-	if err != nil || !l.isTrustedProxy(peer) {
-		return host
-	}
+	return ClientIP(r, l.trustedProxies)
+}
 
-	var entries []string
-	for _, v := range r.Header.Values("X-Forwarded-For") {
-		entries = append(entries, strings.Split(v, ",")...)
-	}
-	for i := len(entries) - 1; i >= 0; i-- {
-		addr, err := netip.ParseAddr(strings.TrimSpace(entries[i]))
-		if err != nil {
-			return host
-		}
-		addr = addr.Unmap()
-		if !l.isTrustedProxy(addr) {
-			return addr.String()
-		}
-	}
-	return host
+// ClientIP returns the client address of a request, honouring X-Forwarded-For
+// only when the TCP peer is in trusted. See requestctx.ClientIP.
+func ClientIP(r *http.Request, trusted []netip.Prefix) string {
+	return requestctx.ClientIP(r, trusted)
 }
 
 func (l *IPRateLimiter) isTrustedProxy(addr netip.Addr) bool {
-	addr = addr.Unmap()
-	for _, p := range l.trustedProxies {
-		if p.Contains(addr) {
-			return true
-		}
-	}
-	return false
+	return requestctx.IsTrusted(l.trustedProxies, addr)
 }

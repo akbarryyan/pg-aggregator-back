@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"github.com/akbarryyan/pg-aggregator-back/internal/requestctx"
 	"net/http"
 	"strings"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const MerchantIDContextKey contextKey = "merchant_id"
+const MerchantIDContextKey = requestctx.MerchantIDKey
 const MerchantAPIKeyIDContextKey contextKey = "merchant_api_key_id"
 const MerchantEnvironmentContextKey contextKey = "merchant_environment"
 

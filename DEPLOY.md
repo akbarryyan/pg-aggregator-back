@@ -869,6 +869,17 @@ migrasi karena namanya sama):
 
     UPDATE payments SET customer_name = 'Dashboard test' WHERE customer_name = 'TEST PAYMENT';
 
+### Migration 023 — activity log
+
+Tabel baru `activity_logs`: jejak aksi admin dan user merchant (login gagal
+dicatat sebagai `anonymous`). Hanya tambah-saja dari sisi aplikasi, tanpa
+foreign key. Idempoten dan aman dijalankan saat api berjalan: `make migrate`.
+Retensi 90 hari; job purge harian menghapus baris lama dalam batch.
+
+Rollback (menghapus seluruh log aktivitas):
+
+    DROP TABLE IF EXISTS activity_logs;
+
 ## 5. Operasional
 
 ```bash

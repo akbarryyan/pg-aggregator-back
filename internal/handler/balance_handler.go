@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/akbarryyan/pg-aggregator-back/internal/activity"
 	"net/http"
 	"strconv"
 	"strings"
@@ -138,6 +139,7 @@ func (h *MerchantHandler) UpdatePayoutAccount(w http.ResponseWriter, r *http.Req
 	switch {
 	case err == nil:
 		logger.InfofCtx(r.Context(), "merchant %s (user %s) changed payout account", merchantID, userID)
+		activity.AddDetails(r.Context(), map[string]interface{}{"bank": req.BankName, "account_last4": last4(req.AccountNumber)})
 		respondJSON(w, http.StatusOK, acc)
 	case errors.Is(err, merchant.ErrPayoutBankInvalid),
 		errors.Is(err, merchant.ErrPayoutAccountNumberInvalid),
@@ -176,6 +178,7 @@ func (h *MerchantHandler) RequestPayout(w http.ResponseWriter, r *http.Request) 
 	switch {
 	case err == nil:
 		logger.InfofCtx(r.Context(), "merchant %s (user %s) requested payout %s amount %d", merchantID, userID, p.ID, p.Amount)
+		activity.AddDetails(r.Context(), map[string]interface{}{"amount": p.Amount})
 		respondJSON(w, http.StatusCreated, toMerchantPayout(p))
 	case errors.Is(err, merchant.ErrMerchantNotFound):
 		respondError(w, http.StatusNotFound, "Merchant not found")
